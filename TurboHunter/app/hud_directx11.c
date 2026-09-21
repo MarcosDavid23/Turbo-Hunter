@@ -1,14 +1,18 @@
 /*
- * TurboHunter HUD DirectX 11 - 0.4.1
+ * Turbo Hunter 0.5.4 - HUD DirectX 11
  *
  * Compilado dentro do processo pelo Frida CModule. Não cria janela externa.
- * Desenha "AGUARDANDO SOLO" imediatamente, troca para "ABATES: N" após a
- * confirmação segura e mostra temporariamente "RECOLHA OS ANIMAIS" ao atingir
- * 20 cadáveres. Restaura o estado gráfico do jogo através de um command list.
+ * Desenha "AGUARDANDO SOLO" imediatamente, mostra a busca em andamento,
+ * mostra uma ação por vez e informa quantos cadáveres ainda restam durante
+ * a coleta. Restaura o estado gráfico do jogo
+ * através de um command list.
  */
 
 #include <stddef.h>
 #include <stdint.h>
+
+/* Relógio do processo: continua avançando enquanto a busca bloqueia o JS. */
+extern uint64_t th_get_tickcount64(void);
 
 #ifdef HUD_OFFLINE_TEST
 typedef struct _GumInvocationContext GumInvocationContext;
@@ -201,6 +205,7 @@ extern HRESULT D3DCompile(
 );
 
 #define HUD_MAX_VERTICES 8192
+#define HUD_TEXT_CAPACITY 96
 
 static const Guid IID_ID3D11_DEVICE = {
     0xdb6f6ddbu, 0xac77u, 0x4e88u,
@@ -234,9 +239,13 @@ typedef struct HudState {
     volatile int corner;
     volatile int warning;
     volatile int solo_ready;
+    volatile int searching;
     volatile int dirty;
     volatile int status;
     volatile int in_render;
+    volatile int countdown_initial_seconds;
+    volatile int countdown_display_seconds;
+    uint64_t countdown_started_ms;
 
     void *present_address;
     void *resize_buffers_address;
@@ -273,9 +282,13 @@ extern HudState hud_state;
 #define g_corner                 (hud_state.corner)
 #define g_warning                (hud_state.warning)
 #define g_solo_ready             (hud_state.solo_ready)
+#define g_searching              (hud_state.searching)
 #define g_dirty                  (hud_state.dirty)
 #define g_status                 (hud_state.status)
 #define g_in_render              (hud_state.in_render)
+#define g_countdown_initial      (hud_state.countdown_initial_seconds)
+#define g_countdown_display      (hud_state.countdown_display_seconds)
+#define g_countdown_started      (hud_state.countdown_started_ms)
 #define g_present_address        (hud_state.present_address)
 #define g_resize_buffers_address (hud_state.resize_buffers_address)
 #define g_resize_target_address  (hud_state.resize_target_address)
@@ -341,19 +354,32 @@ static const uint8_t *glyph_rows(char character) {
     static const uint8_t d[7] = {0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e};
     static const uint8_t t[7] = {0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
     static const uint8_t e[7] = {0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f};
+    static const uint8_t f[7] = {0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10};
     static const uint8_t g[7] = {0x0e, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0f};
     static const uint8_t h[7] = {0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11};
     static const uint8_t i[7] = {0x0e, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0e};
+    static const uint8_t j[7] = {0x01, 0x01, 0x01, 0x01, 0x11, 0x11, 0x0e};
     static const uint8_t k[7] = {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11};
     static const uint8_t l[7] = {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f};
     static const uint8_t m[7] = {0x11, 0x1b, 0x15, 0x15, 0x11, 0x11, 0x11};
     static const uint8_t n[7] = {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11};
     static const uint8_t o[7] = {0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e};
+    static const uint8_t p[7] = {0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10};
+    static const uint8_t q[7] = {0x0e, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0d};
     static const uint8_t r[7] = {0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11};
     static const uint8_t s[7] = {0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e};
     static const uint8_t u[7] = {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e};
+    static const uint8_t v[7] = {0x11, 0x11, 0x11, 0x11, 0x11, 0x0a, 0x04};
     static const uint8_t w[7] = {0x11, 0x11, 0x11, 0x15, 0x15, 0x1b, 0x11};
+    static const uint8_t x[7] = {0x11, 0x11, 0x0a, 0x04, 0x0a, 0x11, 0x11};
+    static const uint8_t y[7] = {0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04};
+    static const uint8_t z[7] = {0x1f, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1f};
     static const uint8_t colon[7] = {0x00, 0x04, 0x04, 0x00, 0x04, 0x04, 0x00};
+    static const uint8_t period[7] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04};
+    static const uint8_t dash[7] = {0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00};
+    static const uint8_t plus[7] = {0x00, 0x04, 0x04, 0x1f, 0x04, 0x04, 0x00};
+    static const uint8_t pipe[7] = {0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
+    static const uint8_t percent[7] = {0x19, 0x19, 0x02, 0x04, 0x08, 0x13, 0x13};
     static const uint8_t zero[7] = {0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e};
     static const uint8_t one[7] = {0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e};
     static const uint8_t two[7] = {0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f};
@@ -372,19 +398,32 @@ static const uint8_t *glyph_rows(char character) {
         case 'D': return d;
         case 'T': return t;
         case 'E': return e;
+        case 'F': return f;
         case 'G': return g;
         case 'H': return h;
         case 'I': return i;
+        case 'J': return j;
         case 'K': return k;
         case 'L': return l;
         case 'M': return m;
         case 'N': return n;
         case 'O': return o;
+        case 'P': return p;
+        case 'Q': return q;
         case 'R': return r;
         case 'S': return s;
         case 'U': return u;
+        case 'V': return v;
         case 'W': return w;
+        case 'X': return x;
+        case 'Y': return y;
+        case 'Z': return z;
         case ':': return colon;
+        case '.': return period;
+        case '-': return dash;
+        case '+': return plus;
+        case '|': return pipe;
+        case '%': return percent;
         case '0': return zero;
         case '1': return one;
         case '2': return two;
@@ -431,6 +470,10 @@ static void append_quad(
     float blue,
     float alpha
 ) {
+    /* Nunca deixa um quadrilatero pela metade no triangle-list. */
+    if (g_vertex_count > HUD_MAX_VERTICES - 6)
+        return;
+
     append_vertex(left, top, red, green, blue, alpha);
     append_vertex(right, top, red, green, blue, alpha);
     append_vertex(right, bottom, red, green, blue, alpha);
@@ -439,17 +482,108 @@ static void append_quad(
     append_vertex(left, bottom, red, green, blue, alpha);
 }
 
-static int build_text(char *text) {
+static void refresh_countdown(void) {
+    uint64_t now;
+    uint64_t elapsed;
+    int remaining;
+    if (g_searching != 19)
+        return;
+    now = th_get_tickcount64();
+    elapsed = now >= g_countdown_started
+        ? (now - g_countdown_started) / 1000u : 0;
+    remaining = elapsed >= (uint64_t) g_countdown_initial
+        ? 0 : g_countdown_initial - (int) elapsed;
+    if (remaining != g_countdown_display) {
+        g_countdown_display = remaining;
+        g_dirty = 1;
+    }
+}
+
+static int build_text(char *text, int capacity) {
     static const char waiting_text[] = "__HUD_WAITING_TEXT__";
+    static const char searching_text[] = "__HUD_SEARCHING_TEXT__";
+    static const char memory_text[] = "__HUD_MEMORY_TEXT__";
+    static const char lab_attack_text[] = "__HUD_LAB_ATTACK_TEXT__";
+    static const char lab_dont_collect_text[] = "__HUD_LAB_DONT_COLLECT_TEXT__";
+    static const char lab_analyzing_text[] = "__HUD_LAB_ANALYZING_TEXT__";
+    static const char lab_can_collect_text[] = "__HUD_LAB_CAN_COLLECT_TEXT__";
+    static const char lab_see_clue_text[] = "__HUD_LAB_SEE_CLUE_TEXT__";
+    static const char lab_error_text[] = "__HUD_LAB_ERROR_TEXT__";
+    static const char lab_stop_text[] = "__HUD_LAB_STOP_TEXT__";
+    static const char lab_send_zip_text[] = "__HUD_LAB_SEND_ZIP_TEXT__";
+    static const char lab_gps_action_text[] = "__HUD_LAB_GPS_ACTION_TEXT__";
+    static const char lab_countdown_text[] = "__HUD_LAB_COUNTDOWN_TEXT__";
+    static const char lab_collect_text[] = "__HUD_LAB_COLLECT_TEXT__";
+    static const char lab_shot_text[] = "__HUD_LAB_SHOT_TEXT__";
+    static const char lab_move_text[] = "__HUD_LAB_MOVE_TEXT__";
+    static const char position_start_text[] = "__HUD_POSITION_START_TEXT__";
+    static const char position_walk_text[] = "__HUD_POSITION_WALK_TEXT__";
+    static const char position_shoot_text[] = "__HUD_POSITION_SHOOT_TEXT__";
+    static const char position_ready_text[] = "__HUD_POSITION_READY_TEXT__";
+    static const char position_zip_text[] = "__HUD_POSITION_ZIP_TEXT__";
+    static const char position_scanning_text[] = "__HUD_POSITION_SCANNING_TEXT__";
     static const char counter_prefix[] = "__HUD_COUNTER_PREFIX__";
+    const char *status_text;
     int count = g_pending_count;
     int position = 0;
     int prefix_position = 0;
+    int append_count = 0;
 
     if (!g_solo_ready) {
-        while (waiting_text[position] != '\0') {
+        while (waiting_text[position] != '\0' &&
+               position + 1 < capacity) {
             text[position] = waiting_text[position];
             position++;
+        }
+        text[position] = '\0';
+        return position;
+    }
+
+    if (g_searching) {
+        if (g_searching == 10) status_text = lab_attack_text;
+        else if (g_searching == 11) status_text = lab_dont_collect_text;
+        else if (g_searching == 12) status_text = lab_analyzing_text;
+        else if (g_searching == 13) status_text = lab_can_collect_text;
+        else if (g_searching == 14) status_text = lab_see_clue_text;
+        else if (g_searching == 15) status_text = lab_error_text;
+        else if (g_searching == 16) status_text = lab_stop_text;
+        else if (g_searching == 17) status_text = lab_send_zip_text;
+        else if (g_searching == 18) status_text = lab_gps_action_text;
+        else if (g_searching == 19) {
+            status_text = lab_analyzing_text;
+        }
+        else if (g_searching == 20) {
+            status_text = lab_collect_text;
+            append_count = 1;
+        }
+        else if (g_searching == 21) status_text = lab_shot_text;
+        else if (g_searching == 22) status_text = lab_move_text;
+        else if (g_searching == 23) status_text = position_start_text;
+        else if (g_searching == 24) status_text = position_walk_text;
+        else if (g_searching == 25) status_text = position_shoot_text;
+        else if (g_searching == 26) status_text = position_ready_text;
+        else if (g_searching == 27) status_text = position_zip_text;
+        else if (g_searching == 28) {
+            status_text = position_scanning_text;
+            append_count = 1;
+        }
+        else status_text = g_searching == 2 ? memory_text : searching_text;
+        while (status_text[position] != '\0' &&
+               position + 1 < capacity) {
+            text[position] = status_text[position];
+            position++;
+        }
+        if (append_count) {
+            if (count < 0) count = 0;
+            if (count > 999) count = 999;
+            if (count >= 100 && position + 1 < capacity)
+                text[position++] = (char) ('0' + (count / 100));
+            if (count >= 10 && position + 1 < capacity)
+                text[position++] = (char) ('0' + ((count / 10) % 10));
+            if (position + 1 < capacity)
+                text[position++] = (char) ('0' + (count % 10));
+            if (g_searching == 28 && position + 1 < capacity)
+                text[position++] = '%';
         }
         text[position] = '\0';
         return position;
@@ -460,14 +594,16 @@ static int build_text(char *text) {
     if (count > 999)
         count = 999;
 
-    while (counter_prefix[prefix_position] != '\0')
+    while (counter_prefix[prefix_position] != '\0' &&
+           position + 1 < capacity)
         text[position++] = counter_prefix[prefix_position++];
 
-    if (count >= 100)
+    if (count >= 100 && position + 1 < capacity)
         text[position++] = (char) ('0' + (count / 100));
-    if (count >= 10)
+    if (count >= 10 && position + 1 < capacity)
         text[position++] = (char) ('0' + ((count / 10) % 10));
-    text[position++] = (char) ('0' + (count % 10));
+    if (position + 1 < capacity)
+        text[position++] = (char) ('0' + (count % 10));
     text[position] = '\0';
     return position;
 }
@@ -515,8 +651,8 @@ static void append_text_pass(
 
 static void generate_vertices(void) {
     static const char warning_text[] = "__HUD_WARNING_TEXT__";
-    char text[24];
-    int length = build_text(text);
+    char text[HUD_TEXT_CAPACITY];
+    int length = build_text(text, HUD_TEXT_CAPACITY);
     int warning_length = (int) text_length(warning_text);
     int scale;
     int margin;
@@ -591,6 +727,7 @@ int hud_test_generate(
     int corner,
     int warning,
     int solo_ready,
+    int searching,
     float *average_x,
     float *average_y
 ) {
@@ -604,6 +741,7 @@ int hud_test_generate(
     g_corner = corner;
     g_warning = warning;
     g_solo_ready = solo_ready;
+    g_searching = searching;
     generate_vertices();
 
     for (index = 0; index < g_vertex_count; index++) {
@@ -1021,6 +1159,7 @@ static void render_swap_chain(void *swap_chain) {
         }
     }
 
+    refresh_countdown();
     if (!g_command_list || g_dirty) {
         result = rebuild_command_list();
         if (result < 0) {
@@ -1118,21 +1257,34 @@ void hud_set_state(
     int pending_count,
     int corner,
     int warning,
-    int solo_ready
+    int solo_ready,
+    int searching
 ) {
+    int search_mode = searching;
+
     if (pending_count < 0) pending_count = 0;
     if (pending_count > 999) pending_count = 999;
     if (corner < 0 || corner > 3) corner = 1;
+    if (search_mode < 0) search_mode = 0;
+    if (search_mode > 28) search_mode = 28;
+
+    if (search_mode == 19 && g_searching != 19) {
+        g_countdown_initial = pending_count;
+        g_countdown_display = pending_count;
+        g_countdown_started = th_get_tickcount64();
+    }
 
     if (g_pending_count != pending_count || g_corner != corner ||
         g_warning != (warning ? 1 : 0) ||
-        g_solo_ready != (solo_ready ? 1 : 0))
+        g_solo_ready != (solo_ready ? 1 : 0) ||
+        g_searching != search_mode)
         g_dirty = 1;
 
     g_pending_count = pending_count;
     g_corner = corner;
     g_warning = warning ? 1 : 0;
     g_solo_ready = solo_ready ? 1 : 0;
+    g_searching = search_mode;
     g_enabled = enabled ? 1 : 0;
 }
 

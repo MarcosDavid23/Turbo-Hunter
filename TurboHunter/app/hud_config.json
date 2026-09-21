@@ -1,7 +1,8 @@
-{
+﻿{
   "corner": 3,
   "name": "inferior direito",
   "solo_only": 1,
-  "protect_setwaypoint": 1,
-  "language": "auto"
+  "protect_setwaypoint": 0,
+  "language": "auto",
+  "lab_config_version": "0.5.4"
 }
