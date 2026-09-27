@@ -3,8 +3,8 @@
  *
  * Compilado dentro do processo pelo Frida CModule. Não cria janela externa.
  * Desenha "AGUARDANDO SOLO" imediatamente, mostra a busca em andamento,
- * mostra uma ação por vez e informa quantos cadáveres ainda restam durante
- * a coleta. Restaura o estado gráfico do jogo
+ * mostra uma ação por vez, inclui cronômetro nas esperas e informa quantos
+ * cadáveres ainda restam durante a coleta. Restaura o estado gráfico do jogo
  * através de um command list.
  */
 

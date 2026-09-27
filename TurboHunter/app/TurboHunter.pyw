@@ -1,4 +1,4 @@
-# Turbo Hunter 0.5.4
+﻿# Turbo Hunter 0.5.7
 import ctypes
 import importlib.util
 import json
@@ -14,8 +14,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-VERSION = "0.5.4"
-CONFIG_VERSION = "0.5.4"
+VERSION = "0.5.7"
+CONFIG_VERSION = "0.5.7"
 BASE_DIR = Path(__file__).resolve().parent
 INTERNAL_DIR = BASE_DIR.parent
 ROOT_DIR = INTERNAL_DIR.parent

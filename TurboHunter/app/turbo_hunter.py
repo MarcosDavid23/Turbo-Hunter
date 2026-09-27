@@ -1,4 +1,4 @@
-# Turbo Hunter 0.5.4 - Waypoint automático e coleta por DNA
+﻿# Turbo Hunter 0.5.7 - Waypoint automático e coleta por DNA
 # theHunter: Call of the Wild
 # Kill Locator / Localizador de Abates
 # Configurações de segurança e waypoint: hud_config.json
@@ -54,7 +54,7 @@ HUD_C_FILE = Path(__file__).with_name("hud_directx11.c")
 HUD_CONFIG_FILE = Path(__file__).with_name("hud_config.json")
 GUI_STOP_FILE = Path(__file__).with_name(".turbo_hunter_stop")
 MEMORY_SCAN_FILE = Path(__file__).with_name(".turbo_hunter_memory_scan")
-LAB_VERSION = "0.5.4"
+LAB_VERSION = "0.5.7"
 LAB_LIVE_FILE = Path(__file__).with_name("lab_id_vivo_live.jsonl")
 LAB_PACKAGE_PREFIX = "TurboHunter_Log"
 LEGACY_LAB_STATE_FILE = Path(__file__).with_name("lab_id_vivo_state.json")
@@ -88,8 +88,7 @@ JS = r"""
 
 // Laboratório integrado: abates, coleta, posição e waypoint.
 const POSITION_ONLY_LAB = false;
-// Mantém a calibração automática usada no pacote aprovado pelo teste real.
-const ENABLE_POSITION_TELEMETRY = true;
+const PUBLIC_BETA = true;
 
 const HUD_C_SOURCE = "__HUD_C_SOURCE_PLACEHOLDER__";
 const SOLO_ONLY_PROTECTION = __SOLO_ONLY_PLACEHOLDER__;
@@ -280,10 +279,8 @@ const INITIAL_SCAN_START_DELAY_MS = 2000;
 const INITIAL_SCAN_INTERVAL_MS = 1000;
 const INITIAL_SCAN_MAX_ATTEMPTS = 10;
 const INITIAL_SCAN_REQUIRED_CONSECUTIVE = 2;
-const LAB_VERSION = "0.5.4";
+const LAB_VERSION = "0.5.7";
 const BULK_STARTUP_RECOVERY = true;
-// Esta rotina também localiza e confirma o objeto nativo do mapa. Portanto,
-// deve permanecer ativa; a versão pública filtra somente a gravação pesada.
 const RAY_X_TRACE = true;
 const RAY_X_CLUE_RADII_M = [1, 3, 5, 10, 25, 60];
 const RAY_X_PROBABLE_DUPLICATE_MAX_M = 10;
@@ -305,7 +302,7 @@ const COLLECTION_DEBUG_AFTER_DELAYS = [
 const LAB_REGISTRY_RAW_SIZE = 0x100;
 const LAB_POINTER_PREVIEW_SIZE = 0x80;
 const LAB_MAX_POINTER_PREVIEWS = 24;
-const LAB_REGISTRY_MONITOR_MS = 1000;
+const LAB_REGISTRY_MONITOR_MS = 2000;
 const LAB_REGISTRY_HEARTBEAT_MS = 10000;
 const RECENT_REMOVED_REGISTRY_WINDOW_MS = 20000;
 // A confirmação E+ENTER pode chegar antes de o jogo retirar o registro tipo
@@ -539,6 +536,7 @@ let deathSignalRecordCorpse = null;
 let deathSignalAnalysisAttempt = 0;
 let deathSignalBaselineRecordCorpse = null;
 let deathSignalBaselineAttempt = 0;
+let clueFeedbackSerial = 0;
 
 let bulkDeadBodyScanRunning = false;
 let bulkDeadBodyScanFinished = false;
@@ -547,6 +545,15 @@ let bulkDeadBodyScanAttempt = 0;
 let bulkDeadBodyScanTimer = null;
 let bulkDeferredRegistryIds = new Set();
 let bulkDeferredRegistryReserve = "";
+// IDs crus do catálogo que já se provaram falsos nesta reserva. Alguns
+// objetos temporários de pista usam o mesmo tipo 39 dos cadáveres antigos.
+let rejectedCatalogRegistryIds = new Set();
+let catalogNearManualChecks = {};
+// O descarte manual vale somente para o alvo selecionado nesta reserva.
+let f6TargetKey = "";
+let f6PressCount = 0;
+let skippedCorpseKeys = new Set();
+let skippedStrongDnas = new Set();
 let manualOldCorpseScanVisible = false;
 let consecutiveEmptyManualScans = 0;
 // A recuperação guiada só é acionada quando o jogador pede F6.
@@ -3293,13 +3300,21 @@ function labCaptureRegistry(reason, deep, force) {
 }
 
 function labScheduleRegistryBurst(reason) {
-    const delays = [0, 250, 1000, 5000, 15000];
+    // A leitura periódica continua disponível. Cinco capturas extras por
+    // morte/coleta/pista se acumulavam enquanto vários animais eram abatidos.
+    // Dê primeiro tempo à atualização do GPS e faça só uma conferência leve.
+    const quickEvent = reason === "morte_confirmada" ||
+        reason === "coleta_confirmada" ||
+        reason === "pista_de_animal_morto" || reason === "f6";
+    const delays = quickEvent ? [1500] : [0, 250, 1000, 5000, 15000];
 
     for (let i=0; i<delays.length; i++) {
         const delay = delays[i];
         const timer = setTimeout(function () {
-            const deep = delay === 0 || delay === 1000 || delay === 5000;
-            labCaptureRegistry(`${reason || "evento"}+${delay}ms`, deep, true);
+            const deep = !quickEvent &&
+                (delay === 0 || delay === 1000 || delay === 5000);
+            labCaptureRegistry(`${reason || "evento"}+${delay}ms`,
+                deep, !quickEvent);
         }, delay);
         labBurstTimers.push(timer);
     }
@@ -6148,9 +6163,20 @@ function removePendingByStableRegistryId(registryId, payload, delay) {
     const removed = pending.splice(matches[0], 1)[0];
     const aliases = removeStrongDnaAliases(removed);
     updateHudWarningForCount();
-    if (hadOwnedMarker)
-        clearMarkerInternal();
-    resetMarkerState();
+    // Coletar outro corpo não deve apagar e recriar a seta que já aponta
+    // para um animal ainda pendente.
+    const markedTargetStillPending = currentKey !== "" && pending.some(
+        function (corpse) { return corpseKey(corpse) === currentKey; }
+    );
+    if (!markedTargetStillPending) {
+        if (hadOwnedMarker)
+            clearMarkerInternal();
+        resetMarkerState();
+    } else {
+        currentIndex = pending.findIndex(function (corpse) {
+            return corpseKey(corpse) === currentKey;
+        });
+    }
     rememberNavigationAnchor(
         removed,
         "coleta confirmada pelo desaparecimento do ID estável"
@@ -6216,7 +6242,11 @@ function labScheduleStableIdHarvestProbe(
     // harvest_animal2 confirma o Enter, mas o jogo ainda pode levar alguns
     // segundos para retirar o ID do catálogo. No teste 0.9.20 essa diferença
     // chegou a 2,7 s; a janela antiga de 2,2 s terminava cedo demais.
-    const delays = [150, 500, 1200, 2200, 3500, 5000, 8000];
+    // Quando a coleta já foi ligada a um DNA, o ID não pode descontar outro
+    // animal. Uma leitura diagnóstica basta; preserve a série completa
+    // somente para uma coleta antiga ainda sem associação segura.
+    const delays = removed !== null ? [2500] :
+        [150, 500, 1200, 2200, 3500, 5000, 8000];
 
     for (let i=0; i<delays.length; i++) {
         const delay = delays[i];
@@ -6526,6 +6556,7 @@ function bulkRegistryCandidates(scan) {
         const key = bulkRegistryEntryKey(entry);
 
         if (key === "" || seen.has(key) ||
+            rejectedCatalogRegistryIds.has(key) ||
             !validCoord(entry.x) || !validCoord(entry.y) ||
             !validCoord(entry.z))
             continue;
@@ -6643,7 +6674,7 @@ function bulkApplyConfirmedRegistryBodies(firstScan, secondScan, reason, manual)
     for (let i=0; i<first.length; i++)
         firstById[bulkRegistryEntryKey(first[i])] = first[i];
 
-    const confirmed = [];
+    let confirmed = [];
 
     for (let i=0; i<second.length; i++) {
         const entry = second[i];
@@ -6658,6 +6689,7 @@ function bulkApplyConfirmedRegistryBodies(firstScan, secondScan, reason, manual)
 
     rayXCatalogAnalysis(confirmed, "duas leituras confirmadas");
 
+    // A análise não descarta IDs. Só o terceiro F6 descarta o alvo atual.
     // Um F6 preserva dados de DNA/pista dos IDs ainda presentes no catálogo.
     // Só descarta entradas antigas cujo ID sumiu do catálogo do jogo.
     const confirmedIds = new Set(confirmed.map(bulkRegistryEntryKey));
@@ -6782,21 +6814,23 @@ function bulkApplyConfirmedRegistryBodies(firstScan, secondScan, reason, manual)
         sendGpsStatus("registry_bulk_empty", "nenhum cadáver disponível");
     }
 
-    if (manual && deferred.length > 0) {
+    const secondF6ForCurrentTarget = manual && f6PressCount >= 2 &&
+        f6TargetKey !== "" && pending.some(function (corpse) {
+            return corpseKey(corpse) === f6TargetKey;
+        });
+    if (secondF6ForCurrentTarget) {
         labRecoveryStage = 1;
         setDeathSignalPhase(DEATH_SIGNAL_PHASE_SEE_CLUE,
-            "F6 encontrou IDs sem DNA; examine a pista de sangue se faltar um animal");
-        log("🟠 LAB: F6 ENCONTROU ID SEM DNA. CONTADOR PRESERVADO. " +
-            "SE FALTA UM ABATE, EXAMINE UMA PISTA DE SANGUE; " +
-            "SE NÃO FALTA, CONTINUE CAÇANDO.");
-    } else if (manual && newRegistryIds === 0 && labRecoveryStage >= 2) {
-        if (labRecoveryStage >= 2) {
-            labRecoveryStage = 3;
-            setDeathSignalPhase(DEATH_SIGNAL_PHASE_SEND_ZIP,
-                "F6 e a pista não localizaram um corpo novo");
-            log("🟠 LAB: F6 E A PISTA NÃO ENCONTRARAM UM CORPO NOVO. " +
-                "SE HÁ UM CORPO NÃO CONTADO, CLIQUE PARAR E ENVIE O ZIP.");
-        }
+            "segundo F6: examine uma pista de sangue deste animal");
+        log("🩸 F6 2/3: análise concluída. Examine a pista de sangue " +
+            "deste animal. Para ignorar só esta marcação, F6 novamente.");
+    } else if (manual) {
+        labRecoveryStage = 0;
+        setDeathSignalPhase(DEATH_SIGNAL_PHASE_NORMAL,
+            "primeiro F6: análise concluída; marcação atualizada");
+        if (deferred.length > 0)
+            log("🔎 F6 1/3: IDs sem DNA guardados para conferir na " +
+                "próxima busca; marque o corpo identificado mais próximo.");
     } else if (deferred.length > 0) {
         labRecoveryStage = 0;
         log("🟠 LAB: " + deferred.length +
@@ -7181,13 +7215,61 @@ function scheduleDeferredCatalogRecheckAfterHarvest(sequence) {
 function forceBulkDeadBodyScan() {
     if (scriptStopping || multiplayerBlocked)
         return {ok:false, reason:"sessão indisponível"};
+    if (!soloConfirmed || activeReserve === "")
+        return {ok:false, reason:"reserve_not_ready"};
+    if (bulkDeadBodyScanRunning || bulkDeadBodyScanTimer !== null)
+        return {ok:false, reason:"search_in_progress"};
+
+    const player = getPlayerPos();
+    const index = pending.findIndex(function (corpse) {
+        return corpseKey(corpse) === currentKey;
+    });
+    const selected = index >= 0 ? pending[index] : null;
+    const selectedKey = selected ? corpseKey(selected) : "";
+    if (selectedKey !== f6TargetKey) {
+        f6TargetKey = selectedKey;
+        f6PressCount = 0;
+    }
+    // Só a marcação que o jogador alcançou entra na sequência de três F6.
+    // Longe dela, o F6 continua sendo uma busca manual comum.
+    const nearTarget = selected && player &&
+        distanceXZ(player, selected) <= 25.0;
+    if (nearTarget) {
+        if (f6PressCount >= 2) {
+            const key = selectedKey;
+            const registryId = normalizeRegistryId(selected.recovered_registry_id);
+            const dna = scopedStrongCorpseDna(selected);
+            skippedCorpseKeys.add(key);
+            if (registryId !== "") rejectedCatalogRegistryIds.add(registryId);
+            if (dna !== "") skippedStrongDnas.add(dna);
+            pending.splice(index, 1);
+            f6TargetKey = "";
+            f6PressCount = 0;
+            sendLabEvent("f6_current_target_skipped", {
+                target:labSanitizeValue(selected, 0),
+                key:key, registry_id:registryId, dna:dna,
+                remaining:labPendingSnapshot()
+            });
+            log("⏭️ F6: somente esta marcação foi ignorada; " +
+                "procurando o próximo cadáver. Restantes=" + pending.length + ".");
+            emitRuntimeState("F6 ignorou apenas o alvo atual");
+            updateHudState();
+            updateHudWarningForCount();
+            // A limpeza só toca o ponto criado pelo Turbo Hunter.
+            if (markerOwned) clearOwn("F6 ignorou o alvo atual", true);
+            else { currentKey = ""; switchingKey = ""; }
+            if (pending.length) scheduleNearestUpdate(80, "F6: próximo cadáver");
+            return {ok:true, skipped:true, pending:pending.length};
+        }
+        f6PressCount++;
+    }
     waypointRecoverySerial++;
     for (const key of Object.keys(waypointInactiveRetries))
         delete waypointInactiveRetries[key];
     waypointClearInstructionIssued = false;
     hudGpsActionRequired = false;
     cancelWaypointWork();
-    currentKey = "";
+    // Mantenha a marcação visível durante a análise; evita trocar o alvo.
     bulkDeadBodyScanAttempt = 0;
     bulkDeadBodyScanFinished = false;
     // Uma busca manual passa a ser a nova verdade do catálogo. Não deixe uma
@@ -7199,9 +7281,14 @@ function forceBulkDeadBodyScan() {
     // quando dois retratos confirmam os IDs reais. Enquanto isso, mostre o
     // estado de busca; nunca remova pelo corpo espacialmente mais próximo.
     const result = scheduleBulkDeadBodyScan(0, true, "F6");
-    if (result.ok)
+    if (result.ok) {
         setDeathSignalPhase(DEATH_SIGNAL_PHASE_ANALYZING,
             "F6: conferindo IDs e coletas");
+        sendLabEvent("f6_target_analysis_started", {
+            target_key:selectedKey, press:nearTarget ? f6PressCount : 0,
+            distance_m:nearTarget ? distanceXZ(player, selected) : null
+        });
+    }
     return result;
 }
 
@@ -8921,6 +9008,12 @@ function commitReserveChange(nextReserve) {
     activeReserve = nextReserve;
     pending = [];
     restoredPendingBuffer = [];
+    rejectedCatalogRegistryIds.clear();
+    catalogNearManualChecks = {};
+    skippedCorpseKeys.clear();
+    skippedStrongDnas.clear();
+    f6TargetKey = "";
+    f6PressCount = 0;
     labRecentRemovedRegistryEntries = [];
     labDeferredStableHarvests = [];
     forensicScanSerial++;
@@ -9012,6 +9105,12 @@ function handleReserveSignal(o) {
     if (activeReserve === "") {
         cancelReserveCandidate();
         activeReserve = nextReserve;
+        rejectedCatalogRegistryIds.clear();
+        catalogNearManualChecks = {};
+        skippedCorpseKeys.clear();
+        skippedStrongDnas.clear();
+        f6TargetKey = "";
+        f6PressCount = 0;
         log(`🗺️ RESERVA ATIVA detectada: ${activeReserve}.`);
         restorePendingStateForActiveReserve();
         return;
@@ -9812,7 +9911,7 @@ function observePlayerTelemetry(path,payload) {
     playerProbeLastSample={position:sample,at:Date.now()};
     // O primeiro disparo calibra automaticamente a posição. F6 continua
     // disponível como segunda tentativa se a calibração perder amostras.
-    if (ENABLE_POSITION_TELEMETRY && !playerGlobalPositionReported &&
+    if (PUBLIC_BETA && !playerGlobalPositionReported &&
         readGlobalPlayerPosition() === null &&
         playerProbePhase === 0 &&
         playerProbeAddress === null && !playerProbeRunning &&
@@ -10964,6 +11063,20 @@ function findNearestIndex(pp) {
         }
     }
 
+    // Preserve a marcação atual só quando a diferença é imperceptível.
+    // A margem anterior mantinha um corpo a 80 m mesmo com outro a 60 m.
+    if (pp && currentKey !== "") {
+        const current = choices.find(function (index) {
+            return corpseKey(pending[index]) === currentKey;
+        });
+        if (current !== undefined && current !== best) {
+            const currentD = Math.sqrt(distSqXZ(pp, pending[current]));
+            const alternativeD = Math.sqrt(bestD);
+            if (currentD - alternativeD < 2)
+                return current;
+        }
+    }
+
     return best;
 }
 
@@ -11974,12 +12087,40 @@ function onRecoveredClue(path, o) {
     if (x === null || y === null || z === null)
         return;
 
+    const reserve = o.reserve ?? activeReserve;
+    const recoveryKey = `${reserve ?? ""}|${animalId}`;
+    const alreadyExamined = seenRecoveredClues.has(recoveryKey);
+    if (alreadyExamined && labRecoveryStage !== 1)
+        return;
+
+    // Sempre confirme visualmente que a pista foi recebida. A recuperação
+    // normal costuma terminar muito rápido e antes não aparecia nada no HUD.
+    const guidedClueRecovery = labRecoveryStage === 1;
+    const feedbackSerial = ++clueFeedbackSerial;
+    setDeathSignalPhase(
+        DEATH_SIGNAL_PHASE_ANALYZING,
+        "pista de sangue detectada"
+    );
+    const feedbackTimer = setTimeout(function () {
+        if (scriptStopping || feedbackSerial !== clueFeedbackSerial ||
+            deathSignalPhase !== DEATH_SIGNAL_PHASE_ANALYZING ||
+            labRecoveryStage === 1)
+            return;
+        setDeathSignalPhase(
+            DEATH_SIGNAL_PHASE_NORMAL,
+            "pista de sangue analisada"
+        );
+        log("✅ PISTA DE SANGUE ANALISADA.");
+    }, guidedClueRecovery ? 3000 : 2200);
+    labBurstTimers.push(feedbackTimer);
+
     sendLabEvent("dead_clue_observed", {
         path:path,
         player:getPlayerPos(),
         payload:labSanitizeValue(o, 0)
     });
-    labScheduleRegistryBurst("pista_de_animal_morto");
+    if (!alreadyExamined)
+        labScheduleRegistryBurst("pista_de_animal_morto");
     if (labRecoveryStage === 1) {
         const countBeforeClue = pending.length;
         const checkClue = setTimeout(function () {
@@ -12002,11 +12143,12 @@ function onRecoveredClue(path, o) {
         labBurstTimers.push(checkClue);
     }
 
-    const reserve = o.reserve ?? activeReserve;
-    const recoveryKey = `${reserve ?? ""}|${animalId}`;
-
-    if (seenRecoveredClues.has(recoveryKey))
+    if (alreadyExamined) {
+        sendLabEvent("already_examined_blood_clue_ignored", {
+            animal_id:animalId, guided:guidedClueRecovery
+        });
         return;
+    }
 
     seenRecoveredClues.add(recoveryKey);
 
@@ -12024,6 +12166,13 @@ function onRecoveredClue(path, o) {
         recovered_from_clue:true,
         time:Date.now()
     };
+    if (skippedCorpseKeys.has(corpseKey(c)) ||
+        skippedStrongDnas.has(scopedStrongCorpseDna(c))) {
+        sendLabEvent("f6_skipped_clue_ignored", {
+            corpse:labSanitizeValue(c, 0)
+        });
+        return;
+    }
     const cluePlayer = getPlayerPos();
     const clueAssociationMatrix = rayXAssociationMatrix(c, cluePlayer);
     const clueStrictMatch = pendingMatchesRecoveredClue(c);
@@ -12198,10 +12347,15 @@ function onDeath(path, o) {
         payload:labSanitizeValue(o, 0),
         pending_before:labPendingSnapshot()
     });
-    labScheduleRegistryBurst("morte_confirmada");
-
     const deathDna = strongCorpseDna(o);
     const deathHarvestKey = scopedStrongCorpseDna(o);
+    if (skippedCorpseKeys.has(corpseKey(o)) ||
+        (deathHarvestKey !== "" && skippedStrongDnas.has(deathHarvestKey))) {
+        sendLabEvent("f6_skipped_death_ignored", {
+            payload:labSanitizeValue(o, 0)
+        });
+        return;
+    }
 
     // Uma confirmação de coleta pode chegar antes de um evento de morte
     // atrasado. O DNA já coletado nunca volta para a fila de cadáveres.
@@ -12279,7 +12433,8 @@ function onDeath(path, o) {
     updateHudWarningForCount();
     sendGpsStatus("death", corpseDesc(c));
 
-    scheduleNearestUpdate(220, "novo abate");
+    scheduleNearestUpdate(40, "novo abate");
+    labScheduleRegistryBurst("morte_confirmada");
 }
 
 function nearestCandidate(indices, pp) {
@@ -12696,9 +12851,18 @@ function onHarvest(path, o, sequence) {
         game_confirm_age_ms:finiteNumber(o.confirm_ts) === null ? null :
             Math.max(0, Date.now() - Number(o.confirm_ts) * 1000)
     });
-    if (hadOwnedMarker)
-        clearMarkerInternal();
-    resetMarkerState();
+    const markedTargetStillPending = currentKey !== "" && pending.some(
+        function (corpse) { return corpseKey(corpse) === currentKey; }
+    );
+    if (!markedTargetStillPending) {
+        if (hadOwnedMarker)
+            clearMarkerInternal();
+        resetMarkerState();
+    } else {
+        currentIndex = pending.findIndex(function (corpse) {
+            return corpseKey(corpse) === currentKey;
+        });
+    }
     rememberNavigationAnchor(removed, "coleta confirmada pelo DNA");
     stopHudCountdown("coleta associada ao DNA");
     const removedKey = corpseKey(removed);
@@ -12787,10 +12951,7 @@ function onHarvest(path, o, sequence) {
     if (!PROTECT_SETWAYPOINT)
         manualWaypointOverride = false;
     finalClearDone = false;
-    scheduleNearestUpdate(
-        catalogRecheckScheduled ? 400 : 40,
-        "DNA coletado; marcar próximo cadáver"
-    );
+    scheduleNearestUpdate(40, "DNA coletado; marcar próximo cadáver");
 }
 
 function noDnaHarvestFingerprint(o) {
@@ -13906,12 +14067,12 @@ sendLabEvent("laboratory_loaded", {
     dna_self_test_ok:dnaRuleSelfTest.ok,
     dna_self_test_checks:dnaRuleSelfTest.checks
 });
-log("Turbo Hunter 0.5.4 carregado.");
-log("🧭 TURBO HUNTER 0.5.4: busca e marcação automáticas; F6 recupera quando necessário.");
+log("Turbo Hunter 0.5.7 carregado.");
+log("🧭 TURBO HUNTER 0.5.7: busca e marcação automáticas; F6 atualiza IDs quando necessário.");
 log("🧭 Você pode caçar livremente; a marcação é automática quando validada.");
 log("🧭 Posição do jogador: leitura direta de três referências validadas; F6 também recupera a posição.");
 log("🧬 DNA: pista identifica o animal; distância entre pista e ID não prova identidade.");
-log(`🧩 SEM TRAVA DE ATUALIZAÇÃO: build ${TARGET_GAME_BUILD} é somente referência; mudanças geram aviso e o laboratório continua.`);
+log(`🧩 SEM TRAVA DE ATUALIZAÇÃO: build ${TARGET_GAME_BUILD} é somente referência; mudanças geram aviso e o mod continua.`);
 if (SOLO_ONLY_PROTECTION)
     log("🔒 PROTEÇÃO SOLO ATIVA: multiplayer será bloqueado.");
 else
@@ -13950,22 +14111,14 @@ def log(line):
 
 
 def save_lab_event(event, data=None):
-    """Keep only failure evidence in the public release diagnostic file."""
-    event_name = str(event or "unknown")
-    diagnostic_tokens = (
-        "error", "failed", "failure", "fatal", "crash", "blocked",
-        "unavailable", "timeout", "mismatch", "detached",
-    )
-    if not any(token in event_name.lower() for token in diagnostic_tokens):
-        return
-
+    """Append one machine-readable record without risking the main tracker."""
     record = {
         "saved_at": datetime.now().isoformat(timespec="milliseconds"),
         "lab_version": LAB_VERSION,
         "base_version": "0.5.1",
         "session_id": lab_session_id,
         "machine_label": MACHINE_LABEL,
-        "event": event_name,
+        "event": str(event or "unknown"),
         "data": data if isinstance(data, dict) else {"value": data},
     }
 
@@ -13975,7 +14128,7 @@ def save_lab_event(event, data=None):
             with LAB_LIVE_FILE.open("a", encoding="utf-8") as file:
                 file.write(line + "\n")
     except Exception as exc:
-        print_console("AVISO: nao consegui gravar o diagnostico: " + str(exc))
+        print_console("AVISO LAB: nao consegui gravar evento: " + str(exc))
 
 
 def _read_lab_state_unlocked():
@@ -14155,7 +14308,7 @@ def persist_runtime_state(data):
 
 
 def build_lab_package():
-    """Create a compact support ZIP without the laboratory memory dump."""
+    """Create one ready-to-send ZIP containing both runs and installer evidence."""
     root_dir = Path(__file__).resolve().parents[2]
     runtime_dir = Path(__file__).resolve().parents[1] / "runtime"
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -14173,7 +14326,8 @@ def build_lab_package():
     files = (
         (LOG_FILE, "logs/turbo_hunter_log.txt"),
         (PREVIOUS_LOG_FILE, "logs/turbo_hunter_log_anterior.txt"),
-        (LAB_LIVE_FILE, "logs/erros_tecnicos.jsonl"),
+        (LAB_LIVE_FILE, "logs/lab_id_vivo_live.jsonl"),
+        (LAB_STATE_FILE, "logs/lab_id_vivo_state.json"),
         (HUD_CONFIG_FILE, "hud_config.json"),
         (runtime_dir / "instalacao.log", "instalacao/instalacao.log"),
         (runtime_dir / "install_status.json", "instalacao/install_status.json"),
@@ -14181,12 +14335,13 @@ def build_lab_package():
     )
 
     summary = (
-        "Turbo Hunter 0.5.4\r\n"
+        "Turbo Hunter 0.5.7\r\n"
+        "Base oficial: 0.5.1\r\n"
         f"Computador: {MACHINE_LABEL}\r\n"
         f"Sessao mais recente: {lab_session_id}\r\n"
         "\r\n"
-        "Este pacote compacto foi criado automaticamente ao encerrar o mod.\r\n"
-        "Envie o ZIP inteiro somente quando o suporte solicitar.\r\n"
+        "Este pacote foi criado automaticamente ao encerrar o mod.\r\n"
+        "Envie o ZIP inteiro para analise; nao apague nem edite os arquivos internos.\r\n"
     )
 
     try:
@@ -14202,7 +14357,7 @@ def build_lab_package():
                     archive.write(source, arcname=archive_name)
         return destination
     except Exception as exc:
-        print_console("AVISO: nao consegui montar o pacote de log: " + str(exc))
+        print_console("AVISO LAB: nao consegui montar o pacote final: " + str(exc))
         return None
 
 
@@ -14599,7 +14754,10 @@ def run_console_loop(script, initial_corner):
             try:
                 result = script.exports_sync.forceoldcorpsescan()
                 if result.get("ok"):
-                    log("F6: busca limpa de cadáveres sem histórico iniciada.")
+                    if result.get("skipped"):
+                        log("F6: alvo atual ignorado; passando ao próximo.")
+                    else:
+                        log("F6: conferindo cadáveres. Aguarde terminar.")
                 else:
                     reason = str(result.get("reason", "indisponivel"))
                     messages = {
@@ -14704,7 +14862,7 @@ def main():
     save_hud_config(config)
 
     print("=" * 72)
-    print(" TURBO HUNTER 0.5.4")
+    print(" TURBO HUNTER 0.5.7")
     print("=" * 72)
     print(" COMPUTADOR:", MACHINE_LABEL)
     print()
@@ -14815,12 +14973,12 @@ def main():
             )
         if saved_state.get("pending_corpses"):
             log(
-                "MEMÓRIA: " +
+                "MEMÓRIA LAB: " +
                 str(len(saved_state.get("pending_corpses", []))) +
                 " cadáver(es) pendente(s) preservado(s) para restauração."
             )
     except Exception as exc:
-        log("AVISO: nao consegui restaurar o estado dos abates: " + str(exc))
+        log("AVISO LAB: nao consegui restaurar o estado forense: " + str(exc))
 
     try:
         corner = load_hud_corner()
@@ -14856,7 +15014,7 @@ def main():
         except Exception:
             pass
 
-        # Give the final runtime state time to reach the Python process.
+        # Give Frida's final registry snapshot time to reach the JSONL writer.
         time.sleep(0.35)
 
         expected_detach_event.set()
@@ -14867,7 +15025,7 @@ def main():
             pass
 
         save_lab_event("python_session_finished", {"normal_shutdown": True})
-        log("Sessão encerrada; preparando o pacote compacto de suporte.")
+        log("Sessão encerrada; preparando o pacote de suporte.")
         package = build_lab_package()
         if package is not None:
             print_console("PACOTE DE LOG CRIADO: " + str(package))

@@ -2,82 +2,60 @@
 
 **Kill Tracker & Lost Harvest Finder for theHunter: Call of the Wild**
 
-Current source version: **0.5.4**
+Current source version: **0.5.7**
 
 ## What is Turbo Hunter?
 
-Turbo Hunter tracks animals killed by the player but not yet harvested. Its in-game HUD shows the number of pending kills, while the game's GPS automatically points to the nearest pending body.
+Turbo Hunter tracks animals you have brought down but have not yet harvested. Its in-game display shows the number of pending animals, and the game's GPS points to the nearest one.
 
-Version 0.5.4 also includes manual recovery for missing kills, multiplayer protection, manual-waypoint protection, an improved installer and interfaces in Portuguese (Brazil), English and Simplified Chinese.
-
-## How it works
-
-Turbo Hunter is a standalone Python project. It uses **Frida** to connect to the running `theHunter: Call of the Wild` process and interact with the game functions and memory required by the tracker.
-
-The DirectX 11 HUD is implemented in:
-
-`TurboHunter/app/hud_directx11.c`
-
-Turbo Hunter is **not a Cheat Engine executable and was not compiled from a Cheat Engine table**. The source is published so users can inspect how the program works.
-
-## Main files
-
-- `TurboHunter/app/TurboHunter.pyw` — graphical interface
-- `TurboHunter/app/turbo_hunter.py` — main tracking and waypoint logic
-- `TurboHunter/app/hud_directx11.c` — DirectX 11 HUD
-- `TurboHunter/app/hud_config.json` — default settings
-- `TurboHunter/installer/InstallerWorker.ps1` — installer and repair worker
-- `TurboHunter/installer/INICIAR_TEMPLATE.vbs` — launcher template
-- `TurboHunter/installer/REINSTALAR TURBO HUNTER.cmd` — manual repair
-- `INSTALAR TURBO HUNTER.cmd` — main installer
-- `README - LEIA-ME.txt` — complete instructions in English, Portuguese and Simplified Chinese
+Version 0.5.7 improves the speed of automatic marking, updates the marker after a harvest, and makes it easier to find or skip a marker that needs another check. It also improves installation over older versions and adds a desktop shortcut to launch the mod and the game together.
 
 ## Installation
 
-1. Download and extract the complete ZIP into a new folder.
-2. Do not run the installer from inside the ZIP.
-3. Run `INSTALAR TURBO HUNTER.cmd` once.
-4. Wait for all three installation steps to finish.
-5. After installation, use `INICIAR TURBO HUNTER.vbs` to launch the program.
+1. Download and extract the complete ZIP. Do not run the installer from inside the ZIP.
+2. Run `INSTALL TURBO HUNTER.cmd` and wait for installation to finish.
+3. Use the **Turbo Hunter + theHunter** shortcut on your desktop to start Turbo Hunter and the game together.
 
-Internet access may be required during the first installation. If Python or Frida is missing, the launcher can offer to repair the installation. Turbo Hunter 0.5.4 uses **Frida 17.17.0**.
+The installer is for **Windows** and may need an internet connection on first use. The shortcut can find a Steam or Epic Games installation; if needed, it will ask you to locate the game's executable.
 
-## Usage
+## How to play
 
-1. Open Turbo Hunter before or after launching the game.
-2. Select Portuguese (Brazil), English or Simplified Chinese.
-3. Keep multiplayer protection enabled.
-4. Enter a **SOLO** hunt.
-5. Click **START**.
-6. Wait until the HUD is active and shows `KILLS: 0`.
-7. Hunt normally. When a kill is pending, the GPS marks the nearest body.
+Enter a **SOLO** hunt and wait for the on-screen counter. Hunt normally. Turbo Hunter marks the nearest downed animal and updates the count and marker when you harvest it.
 
-## Hotkeys
+### Keys
 
-- **F6** or **NUMPAD \*** — search again for missing kills, refresh player position and restore the GPS
-- **F8** — move the HUD between the four screen corners
-- **F9** — show or hide the HUD
-- **F7** — disabled in this version
+- **F6** or **NUMPAD \***: Check again and wait for **ANALYZING** to finish.
+- **Second press near the current marker**: Follow the prompt to examine a blood clue.
+- **Third press near the current marker**: Skip only that animal and move to the next. Wait for the analysis to finish between presses.
+- **F8**: Move the on-screen display to another corner.
+- **F9**: Show or hide the display.
 
-## Protections
+If something goes wrong, click **STOP** in the Turbo Hunter window and send the ZIP it creates along with a brief description of what happened.
 
-- **Multiplayer protection** is enabled by default and allows Turbo Hunter to run only in SOLO mode. Disabling it permits multiplayer at the user's own risk.
-- **Manual waypoint protection** preserves a waypoint placed by the player until it is cleared.
+For instructions in **English, Portuguese (Brazil) and Simplified Chinese**, see [`README - LEIA-ME.txt`](README%20-%20LEIA-ME.txt).
 
-## Languages
+## Protections and languages
 
-- Portuguese (Brazil)
-- English
-- Simplified Chinese interface; the in-game HUD remains in English because its graphical font currently supports Latin characters only
+- Multiplayer protection is enabled by default and allows Turbo Hunter to run only in SOLO mode. You can disable it if you intentionally want to play with others, at your own risk.
+- Manual waypoint protection can preserve a waypoint you placed until you remove it. This setting is disabled by default.
+- The graphical interface supports Portuguese (Brazil), English and Simplified Chinese. The in-game display remains in English when Chinese is selected because its graphical font supports Latin characters only.
 
-## Source code and security
+## Source code
 
-The complete source code for Turbo Hunter 0.5.4 is available in this repository for inspection. The installer uses PowerShell to prepare Python and Frida.
+Turbo Hunter is a standalone Python project. It uses **Frida** to connect to the running game, and its DirectX 11 display is implemented in C. The source is published so users can inspect how the program works.
 
-Because Turbo Hunter connects to and interacts with the memory of a running game process, some antivirus or browser security systems may classify the program or installer as suspicious. Users may review the Python, PowerShell, VBS, CMD and C source files directly in this repository.
+Main files:
 
-## Game
+- `TurboHunter/app/TurboHunter.pyw` — graphical interface
+- `TurboHunter/app/turbo_hunter.py` — tracking and marking
+- `TurboHunter/app/hud_directx11.c` — in-game display
+- `TurboHunter/app/hud_config.json` — default display settings
+- `TurboHunter/installer/InstallerWorker.ps1` — installation and repair
+- `TurboHunter/installer/LaunchTogether.ps1` — desktop shortcut launcher
+- `TurboHunter/installer/INICIAR_TEMPLATE.vbs` — launcher template
+- `TurboHunter/installer/REINSTALAR TURBO HUNTER.cmd` — manual repair
+- `INSTALL TURBO HUNTER.cmd` — installer
 
-**theHunter: Call of the Wild**
+Because the program connects to a running game process, some antivirus or browser security systems may flag it. The source files can be inspected in this repository.
 
-Turbo Hunter is an independent community project and is not affiliated with the game's developer or publisher.
+Turbo Hunter is an independent community project and is not affiliated with the developer or publisher of **theHunter: Call of the Wild**.
