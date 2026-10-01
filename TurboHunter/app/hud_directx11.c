@@ -1,5 +1,5 @@
 /*
- * TurboHunter HUD DirectX 11 - 0.4.1
+ * TurboHunter HUD DirectX 11 - 0.4.4
  *
  * Compilado dentro do processo pelo Frida CModule. Não cria janela externa.
  * Desenha "AGUARDANDO SOLO" imediatamente, troca para "ABATES: N" após a
