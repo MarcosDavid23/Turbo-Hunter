@@ -1,0 +1,14 @@
+{
+  "python": {
+    "filename": "python-runtime.tar.gz",
+    "size_bytes": 21970131,
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.13.16%2B20261003-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+    "sha256": "ec43f1a85c29f147d7ae2d13218c52c70b24a983a82ab22d6c607c0593060e10"
+  },
+  "frida": {
+    "filename": "frida-17.17.0-cp37-abi3-win_amd64.whl",
+    "size_bytes": 41839329,
+    "url": "https://files.pythonhosted.org/packages/73/5d/2a06ea09a854581bec9840232c939d1191da8df70ec90d3ac2db930f9e1f/frida-17.17.0-cp37-abi3-win_amd64.whl",
+    "sha256": "f9c3d431144d143d5eaf6830f0b85042c34517f63b2cf0e83aaa5e2ba4b636dd"
+  }
+}

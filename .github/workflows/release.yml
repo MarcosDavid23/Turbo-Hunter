@@ -1,0 +1,53 @@
+name: Publish Turbo Hunter release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/release.json'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: turbo-hunter-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'MarcosDavid23/Turbo-Hunter'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify approved ZIP and Windows installer syntax
+        shell: powershell
+        run: ./.github/scripts/verify-release.ps1
+      - name: Publish the verified installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = Get-Content -LiteralPath '.github/release.json' -Raw | ConvertFrom-Json
+          $existingText = gh api "repos/$env:GH_REPO/releases/tags/$($release.tag)" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $existing = $existingText | ConvertFrom-Json
+            if (-not $existing.draft -or $existing.target_commitish -ne $env:GITHUB_SHA) {
+              throw 'A published release or a release for another commit already uses this tag.'
+            }
+            gh release upload $release.tag $release.asset --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Could not attach the approved ZIP.' }
+          } else {
+            gh release create $release.tag $release.asset --target $env:GITHUB_SHA --draft --title $release.title --notes-file $release.notes
+            if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the release.' }
+          }
+          gh release edit $release.tag --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the release.' }

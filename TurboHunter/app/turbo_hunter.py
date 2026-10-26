@@ -1,4 +1,4 @@
-﻿# Turbo Hunter 0.5.7 - Waypoint automático e coleta por DNA
+# Turbo Hunter 0.6.0 - Waypoint automático e coleta por DNA
 # theHunter: Call of the Wild
 # Kill Locator / Localizador de Abates
 # Configurações de segurança e waypoint: hud_config.json
@@ -12,7 +12,6 @@ import sys
 import time
 import threading
 import traceback
-import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -48,22 +47,17 @@ except ImportError:
     raise SystemExit(1)
 
 PROCESS_NAME = "theHunterCotW_F.exe"
-LOG_FILE = Path(__file__).with_name("turbo_hunter_log.txt")
-PREVIOUS_LOG_FILE = Path(__file__).with_name("turbo_hunter_log_anterior.txt")
+ROOT_DIR = Path(__file__).resolve().parents[2]
+RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
+LOG_FILE = ROOT_DIR / "log.txt"
+MAX_LOG_BYTES = 2 * 1024 * 1024
 HUD_C_FILE = Path(__file__).with_name("hud_directx11.c")
 HUD_CONFIG_FILE = Path(__file__).with_name("hud_config.json")
 GUI_STOP_FILE = Path(__file__).with_name(".turbo_hunter_stop")
 MEMORY_SCAN_FILE = Path(__file__).with_name(".turbo_hunter_memory_scan")
-LAB_VERSION = "0.5.7"
-LAB_LIVE_FILE = Path(__file__).with_name("lab_id_vivo_live.jsonl")
-LAB_PACKAGE_PREFIX = "TurboHunter_Log"
-LEGACY_LAB_STATE_FILE = Path(__file__).with_name("lab_id_vivo_state.json")
-_LAB_LOCAL_APPDATA = os.environ.get("LOCALAPPDATA", "").strip()
-LAB_STATE_FILE = (
-    Path(_LAB_LOCAL_APPDATA) / "TurboHunter" / "Laboratorio" /
-    "lab_id_vivo_state.json"
-    if _LAB_LOCAL_APPDATA else LEGACY_LAB_STATE_FILE
-)
+LAB_VERSION = "0.6.0"
+# A single bounded state file preserves pending harvests only for the same game.
+LAB_STATE_FILE = RUNTIME_DIR / "session_state.json"
 
 
 def detect_machine_label():
@@ -279,7 +273,7 @@ const INITIAL_SCAN_START_DELAY_MS = 2000;
 const INITIAL_SCAN_INTERVAL_MS = 1000;
 const INITIAL_SCAN_MAX_ATTEMPTS = 10;
 const INITIAL_SCAN_REQUIRED_CONSECUTIVE = 2;
-const LAB_VERSION = "0.5.7";
+const LAB_VERSION = "0.6.0";
 const BULK_STARTUP_RECOVERY = true;
 const RAY_X_TRACE = true;
 const RAY_X_CLUE_RADII_M = [1, 3, 5, 10, 25, 60];
@@ -635,6 +629,9 @@ function sendGpsStatus(event, message) {
 }
 
 function sendLabEvent(event, data) {
+    // Only these two events restore gameplay state; diagnostics stay in log.txt.
+    if (event !== "harvest_dna_committed" && event !== "runtime_state_snapshot")
+        return;
     send({
         type:"lab_event",
         event:event,
@@ -2063,7 +2060,7 @@ function completeWaypointHardwareCapture(hit) {
         hit:labSanitizeValue(hit, 0),
         all_candidates:labSanitizeValue(waypointHardwareWatchHits, 0),
         instruction:
-            "aguardar o GPS mover o ponto; continuar a caçar ou encerrar e enviar o ZIP"
+            "aguardar o GPS mover o ponto; continuar a caçar ou encerrar e enviar log.txt"
     });
 
     labScheduleRegistryBurst("waypoint_hardware_capturado");
@@ -2148,7 +2145,7 @@ function installWaypointHardwareExceptionHandler() {
                             "limite de acessos ao limpar waypoint"
                         );
                         log("🟠 LAB: CAPTURA DA LIMPEZA INCOMPLETA. " +
-                            "PARE E ENVIE O ZIP DO LOG.");
+                            "PARE E ENVIE LOG.TXT.");
                     }
                 } else if (snapshot.waypoint_complete === true) {
                     completeWaypointHardwareCapture(hit);
@@ -2159,7 +2156,7 @@ function installWaypointHardwareExceptionHandler() {
                     );
                     log(
                         "🟠 LAB: limite da captura atingido. Clique em PARAR " +
-                        "e envie o ZIP para analisar os candidatos."
+                        "e envie log.txt para analisar os candidatos."
                     );
                     setDeathSignalPhase(
                         DEATH_SIGNAL_PHASE_SEND_ZIP,
@@ -2406,7 +2403,7 @@ function confirmWaypointClearCapture(reason) {
     resetMarkerState();
     finalClearDone = true;
     log("🟠 LAB: LIMPEZA DO PONTO CAPTURADA. " +
-        "CLIQUE PARAR E ENVIE O ZIP PARA CORRIGIR A REMOÇÃO AUTOMÁTICA.");
+        "CLIQUE PARAR E ENVIE LOG.TXT PARA CORRIGIR A REMOÇÃO AUTOMÁTICA.");
     if (pending.length && !map.isNull() &&
         labHex(map.add(0x3d3), 1) === "00") {
         finalClearDone = false;
@@ -2486,7 +2483,7 @@ function armWaypointClearWatch(reason) {
         hudGpsActionRequired = false;
         updateHudState();
         log("🟠 LAB: CAPTURA DA LIMPEZA NÃO TERMINOU. " +
-            "PARE E ENVIE O ZIP DO LOG.");
+            "PARE E ENVIE LOG.TXT.");
     }, WAYPOINT_HARDWARE_WATCH_TIMEOUT_MS);
     return true;
 }
@@ -2549,7 +2546,7 @@ function requestWaypointClearCapture(reason, target) {
             pending:labPendingSnapshot(), hardware_watch_started:false
         });
         log("🟠 LAB: NÃO CONSEGUI ATUALIZAR A MARCAÇÃO. " +
-            "CLIQUE PARAR E ENVIE O ZIP DO LOG.");
+            "CLIQUE PARAR E ENVIE LOG.TXT.");
     }
     inspectAndRetry();
 }
@@ -2622,38 +2619,47 @@ function scanWaypointIdConstantReferences(reason) {
                 waypointConfirmedSetterInterceptor = Interceptor.attach(
                     setterCandidate, {
                     onEnter(args) {
-                        if (scriptStopping || waypointConfirmedSetterCaptures >= 6)
-                            return;
-                        const map = args[0];
-                        const vector = args[1];
-                        const target = readHookPosition(vector);
                         if (scriptStopping)
                             return;
-                        waypointConfirmedSetterCaptures++;
-                        sendLabEvent("waypoint_setter_arguments_captured", {
-                            capture:waypointConfirmedSetterCaptures,
-                            function_address:waypointConfirmedSetterAddress,
-                            function_rva:setterCandidate.sub(BASE).toString(),
-                            map_pointer:pstr(map),
-                            vector_pointer:pstr(vector),
-                            vector:target,
-                            id_at_map_0x3a0:labHex(map.add(0x3a0), 8),
-                            type_at_map_0x3d0:labHex(map.add(0x3d0), 8),
-                            map_coordinates_hex:labHex(map.add(0x390), 12),
-                            caller:waypointHardwareBacktrace(
-                                this.context, Backtracer.ACCURATE, false
-                            ),
-                            pending:labPendingSnapshot()
-                        });
-                        if (waypointConfirmedSetterCaptures === 1) {
-                            // Confirma se a referência global ainda é única.
-                            rayXDiscoverMapSingletonSlots(
-                                map, "setter_atual_0.9.50", false
-                            );
-                        }
+                        // Protection is gameplay behavior, not a diagnostic.
+                        // It must keep observing manual clicks after capture #6,
+                        // even if a later diagnostic read fails.
                         if (!insideSet && PROTECT_SETWAYPOINT &&
-                            pending.length && soloConfirmed) {
+                            !multiplayerBlocked && soloConfirmed)
                             protectManualWaypoint();
+                        if (waypointConfirmedSetterCaptures >= 6)
+                            return;
+                        try {
+                            const map = args[0];
+                            const vector = args[1];
+                            const target = readHookPosition(vector);
+                            if (scriptStopping)
+                                return;
+                            waypointConfirmedSetterCaptures++;
+                            sendLabEvent("waypoint_setter_arguments_captured", {
+                                capture:waypointConfirmedSetterCaptures,
+                                function_address:waypointConfirmedSetterAddress,
+                                function_rva:setterCandidate.sub(BASE).toString(),
+                                map_pointer:pstr(map),
+                                vector_pointer:pstr(vector),
+                                vector:target,
+                                id_at_map_0x3a0:labHex(map.add(0x3a0), 8),
+                                type_at_map_0x3d0:labHex(map.add(0x3d0), 8),
+                                map_coordinates_hex:labHex(map.add(0x390), 12),
+                                caller:waypointHardwareBacktrace(
+                                    this.context, Backtracer.ACCURATE, false
+                                ),
+                                pending:labPendingSnapshot()
+                            });
+                            if (waypointConfirmedSetterCaptures === 1) {
+                                // Confirma se a referência global ainda é única.
+                                rayXDiscoverMapSingletonSlots(
+                                    map, "setter_atual_0.9.50", false
+                                );
+                            }
+                        } catch (_) {
+                            // Optional capture failure must not stop the mod or
+                            // bypass manual protection on later native calls.
                         }
                     }
                 });
@@ -2683,7 +2689,7 @@ function scanWaypointIdConstantReferences(reason) {
             hits:hits
         });
         if (autoWaypointSetter === null && pending.length)
-            log("🟠 LAB: ERRO DE MARCAÇÃO. PARE E ENVIE O ZIP DO LOG.");
+            log("🟠 LAB: ERRO DE MARCAÇÃO. PARE E ENVIE LOG.TXT.");
     }
 
     function nextRange() {
@@ -2847,7 +2853,7 @@ function enableWaypointWriterMonitorAt(target, size, generation) {
                     log(
                         "🧪 WAYPOINT AUTOMÁTICO: escritor novo capturado em " +
                         (context.rva || context.address) +
-                        "; dados guardados no ZIP."
+                        "; consulte log.txt."
                     );
                     const timer = setTimeout(function () {
                         labCaptureRegistry(
@@ -3244,6 +3250,9 @@ function labCaptureRegistry(reason, deep, force) {
         LAB_REGISTRY_HEARTBEAT_MS;
 
     labTraceRegistryDelta(snapshot, reason);
+    // Reuse this snapshot instead of adding another catalog scan each tick.
+    if (PROTECT_SETWAYPOINT)
+        preserveManualWaypoint(getSingletonMap(), snapshot);
     applyRegistryWaypointFallback(snapshot, reason);
     if (waypointHardwareWatchActive &&
         waypointHardwareWatchMode === "clear" &&
@@ -5325,7 +5334,7 @@ function collectionDebugHarvestObserved(path, harvest) {
                 });
                 log(
                     "✅ DEPURAÇÃO CONCLUÍDA. Agora clique em PARAR e envie " +
-                    "o ZIP PACOTE_LAB_ABATES_SEM_HISTORICO."
+                    "log.txt."
                 );
             }
         }, delay);
@@ -7046,7 +7055,7 @@ function bulkDeadBodyScanFailed(reason) {
     manualOldCorpseScanVisible = false;
     stopHudCountdown("busca de cadáveres falhou");
     setDeathSignalPhase(DEATH_SIGNAL_PHASE_SEND_ZIP,
-        "o catálogo não ficou disponível; clique PARAR e envie o ZIP");
+        "o catálogo não ficou disponível; clique PARAR e envie log.txt");
     updateHudState();
     sendLabEvent("bulk_startup_recovery_failed", {
         reason:String(reason || "memória indisponível"),
@@ -7054,7 +7063,7 @@ function bulkDeadBodyScanFailed(reason) {
     });
     log("❌ BUSCA LIMPA: " + String(reason || "memória indisponível") + ".");
     log("🟠 LAB: ERRO AO LER OS ABATES. NÃO REPITA F6; " +
-        "CLIQUE PARAR E ENVIE O ZIP.");
+        "CLIQUE PARAR E ENVIE LOG.TXT.");
 }
 
 function runBulkDeadBodyScan(manual, reason) {
@@ -7302,7 +7311,7 @@ function deathSignalPhaseName(phase) {
         5:"VEJA UMA PISTA",
         6:"ERRO ENCONTRADO - NÃO COLETE",
         7:"HORA DE PARAR",
-        8:"ENVIAR ZIP LOG"
+        8:"ENVIAR LOG.TXT"
     })[Number(phase)] || "ABATES";
 }
 
@@ -8268,7 +8277,7 @@ function rayXDiscoverMapSingletonSlots(mapPointer, trigger, readOnly) {
         } else {
             log(
                 "🧪 RAIO-X MAPA: " + hits.length +
-                " possível(is) referência(s) registrada(s) no ZIP."
+                " possível(is) referência(s) registrada(s) em log.txt."
             );
         }
 
@@ -8899,7 +8908,7 @@ function warnUpdatedBuild(detectedBuild, fullVersion) {
         `build de referência ${TARGET_GAME_BUILD}` +
         (fullVersion ? ` (${fullVersion})` : "") + ".";
     log("⚠️ " + reason);
-    log("🧩 MODO COMPATÍVEL: o Turbo Hunter continuará funcionando e registrará no ZIP qualquer recurso alterado.");
+    log("🧩 MODO COMPATÍVEL: o Turbo Hunter continuará funcionando e registrará em log.txt qualquer recurso alterado.");
     sendLabEvent("game_build_changed_compatibility_mode", {
         detected_build:detectedGameBuild,
         reference_build:TARGET_GAME_BUILD,
@@ -9579,7 +9588,7 @@ function runPlayerProbeScan(sample) {
     playerProbeScanHudTimer=setInterval(updateHudState,1000);
     updateHudState();
     log("🟠 LAB POSIÇÃO: BUSCA 0%. FIQUE PARADO; " +
-        "AGUARDE APARECER CAMINHE 20M OU PARE E ENVIE ZIP.");
+        "AGUARDE APARECER CAMINHE 20M OU PARE E ENVIE LOG.TXT.");
     sendLabEvent("player_position_probe_started", {
         planned_bytes:planned, ranges:selected.length, attempt:playerProbeAttempt,
         hunter_position:sample
@@ -9629,10 +9638,10 @@ function runPlayerProbeScan(sample) {
         log(cancelled && POSITION_ONLY_LAB
             ? "🟠 LAB POSIÇÃO: BUSCA INTERROMPIDA EM " +
               playerProbeScanProgressPercent + "%; " + hits.size +
-              " CANDIDATO(S) BRUTOS SEM VALIDAÇÃO. CLIQUE PARAR E ENVIE ZIP."
+              " CANDIDATO(S) BRUTOS SEM VALIDAÇÃO. CLIQUE PARAR E ENVIE LOG.TXT."
             : POSITION_ONLY_LAB && playerProbeLabStop
             ? "🟠 LAB POSIÇÃO: DUAS BUSCAS SEM COORDENADAS. " +
-              "PARE E ENVIE O ZIP; NÃO REPITA F6."
+              "PARE E ENVIE LOG.TXT; NÃO REPITA F6."
             : playerProbeMovementDuringScan > 2
             ? "🟠 LAB POSIÇÃO: VOCÊ ANDOU DURANTE A BUSCA. " +
               "APERTE F6 NOVAMENTE; ATIRE E FIQUE PARADO ATÉ TERMINAR."
@@ -9646,7 +9655,7 @@ function runPlayerProbeScan(sample) {
                 ? "🟠 LAB POSIÇÃO: NENHUM VETOR NESTA BUSCA. " +
                   "APERTE F6 MAIS UMA VEZ E FIQUE PARADO."
                 : "🟠 LAB POSIÇÃO: NÃO ACHEI VETOR SEGURO. " +
-                  "CLIQUE PARAR E ENVIE O ZIP DO LOG."));
+                  "CLIQUE PARAR E ENVIE LOG.TXT."));
     }
     function step() {
         if (serial !== playerProbeSerial || scriptStopping) {
@@ -9730,7 +9739,7 @@ function finishPositionOnlyProbe(reason) {
         trace:traces
     });
     log("🟠 LAB POSIÇÃO: " + String(reason || "não foi possível " +
-        "isolar a posição") + ". PARE E ENVIE O ZIP; " +
+        "isolar a posição") + ". PARE E ENVIE LOG.TXT; " +
         "NÃO REPITA F6 NESTA PARTIDA.");
 }
 
@@ -9766,7 +9775,7 @@ function watchConfirmedPlayerPosition() {
             clearInterval(playerProbeLiveWatch);
             playerProbeLiveWatch=null;
             log("✅ LAB POSIÇÃO: MOVIMENTO CONFIRMADO. " +
-                "PARE, CLIQUE PARAR NO PROGRAMA E ENVIE O ZIP.");
+                "PARE, CLIQUE PARAR NO PROGRAMA E ENVIE LOG.TXT.");
             return;
         }
         if (tick % 5 === 0 && live)
@@ -9841,7 +9850,7 @@ function observePlayerProbeShot(sample) {
             playerProbeConfirmedStart=sample;
             watchConfirmedPlayerPosition();
             log("✅ LAB POSIÇÃO CONFIRMADA. CAMINHE MAIS 20 M " +
-                "SEM ATIRAR E DEPOIS PARE E ENVIE O ZIP.");
+                "SEM ATIRAR E DEPOIS PARE E ENVIE LOG.TXT.");
         } else {
             scheduleNearestUpdate(80,"posição real do jogador confirmada");
             log("✅ LAB POSIÇÃO CONFIRMADA EM MOVIMENTO. " +
@@ -9891,7 +9900,7 @@ function observePlayerProbeShot(sample) {
     stopPlayerProbeMonitor();
     updateHudState();
     log("🟠 LAB POSIÇÃO: NÃO CONSEGUI VALIDAR O MOVIMENTO. " +
-        "CLIQUE PARAR E ENVIE O ZIP DO LOG.");
+        "CLIQUE PARAR E ENVIE LOG.TXT.");
 }
 
 function observePlayerTelemetry(path,payload) {
@@ -11158,6 +11167,8 @@ function clearMarkerInternal() {
             return registryWaypointPointer(entry) !== null;
         }) : [];
     const mapFlag = labHex(map.add(0x3d3), 1);
+    if (preserveManualWaypoint(map, snapshot))
+        return false;
     if (mapFlag === "00")
         return true;
     if (waypointEntries.length !== 1 || mapFlag !== "01")
@@ -11248,7 +11259,7 @@ function finishSet(index, wantedKey, serial, reason) {
         if (waypointIdScanFinished && autoWaypointSetter === null &&
             Date.now() - rayXLastMapNullLogAt > 15000) {
             rayXLastMapNullLogAt = Date.now();
-            log("🟠 LAB: ERRO DE MARCAÇÃO. PARE E ENVIE O ZIP DO LOG.");
+            log("🟠 LAB: ERRO DE MARCAÇÃO. PARE E ENVIE LOG.TXT.");
         } else if (waypointIdScanFinished &&
             Date.now() - autoWaypointMissingSince > 35000 &&
             Date.now() - rayXLastMapNullLogAt > 15000) {
@@ -11259,7 +11270,7 @@ function finishSet(index, wantedKey, serial, reason) {
                 unique_reference_pointer:autoMapVerifiedPointer,
                 setter_ready:autoWaypointSetter !== null
             });
-            log("🟠 LAB: ERRO DE MARCAÇÃO. PARE E ENVIE O ZIP DO LOG.");
+            log("🟠 LAB: ERRO DE MARCAÇÃO. PARE E ENVIE LOG.TXT.");
         }
         return;
     }
@@ -11268,13 +11279,19 @@ function finishSet(index, wantedKey, serial, reason) {
     // marcador herdado de outra execução fica preso no mapa até ser limpo.
     // Usar exclusivamente a rotina capturada com assinatura exata.
     let oldWaypoint = null;
+    let markerSnapshot = null;
     try {
         const snapshot = labCollectRegistry(false);
+        markerSnapshot = snapshot;
         if (snapshot.ok === true &&
             Array.isArray(snapshot.waypoint_entries) &&
             snapshot.waypoint_entries.length === 1)
             oldWaypoint = snapshot.waypoint_entries[0];
     } catch (_) {}
+    // Recheck at the write boundary: a player may place a waypoint between
+    // choosing a corpse and the delayed setter running.
+    if (preserveManualWaypoint(map, markerSnapshot) || serial !== switchSerial)
+        return;
     if (labHex(map.add(0x3d3), 1) === "01" &&
         ((!PROTECT_SETWAYPOINT && markerOwned) ||
          (currentKey !== "" && currentKey !== wantedKey) ||
@@ -11367,7 +11384,7 @@ function finishSet(index, wantedKey, serial, reason) {
         // Uma exceção nativa invalida a chamada nesta sessão; só o próximo
         // ZIP poderá determinar se a assinatura mudou.
         autoWaypointSetter = null;
-        log("🟠 LAB: ERRO DE MARCAÇÃO. PARE E ENVIE O ZIP DO LOG.");
+        log("🟠 LAB: ERRO DE MARCAÇÃO. PARE E ENVIE LOG.TXT.");
         sendLabEvent("ray_x_waypoint_set_failed", {
             requested_index:index,
             requested_key:wantedKey,
@@ -11458,7 +11475,7 @@ function verifyAutoWaypointInRegistry(key, target, reason, serial) {
             map_flag_hex:flag, catalog_position_matched:true
         });
         log("🟠 LAB: MARCAÇÃO INATIVA APÓS DUAS TENTATIVAS. " +
-            "CLIQUE PARAR E ENVIE O ZIP DO LOG.");
+            "CLIQUE PARAR E ENVIE LOG.TXT.");
         return;
     }
     if (entries.length) {
@@ -11466,12 +11483,14 @@ function verifyAutoWaypointInRegistry(key, target, reason, serial) {
             "o mapa não confirmou a nova marcação ativa", target
         );
     } else {
-        log("🟠 LAB: ERRO DE MARCAÇÃO. PARE E ENVIE O ZIP DO LOG.");
+        log("🟠 LAB: ERRO DE MARCAÇÃO. PARE E ENVIE LOG.TXT.");
     }
 }
 
 function switchToIndex(index, reason) {
     if (multiplayerBlocked || scriptStopping || !soloConfirmed)
+        return;
+    if (PROTECT_SETWAYPOINT && preserveManualWaypoint(getSingletonMap()))
         return;
 
     if (index < 0 || index >= pending.length)
@@ -11505,6 +11524,8 @@ function switchToIndex(index, reason) {
 }
 
 function clearOwn(reason, forceLog) {
+    if (PROTECT_SETWAYPOINT && preserveManualWaypoint(getSingletonMap()))
+        return;
     const hadMarker = markerOwned || currentKey !== "";
     const hadWork = hadMarker || switchingKey !== "" || switchTimer !== null ||
         externalReapplyTimer !== null || nearestUpdateTimer !== null;
@@ -11518,6 +11539,8 @@ function clearOwn(reason, forceLog) {
     if (hadMarker && !finalClearDone) {
         const restored = restoreRegistryWaypointFallback(reason);
         markerCleared = restored || clearMarkerInternal();
+        if (PROTECT_SETWAYPOINT && manualWaypointOverride)
+            return;
         if (!markerCleared) {
             sendLabEvent("waypoint_auto_clear_unavailable", {
                 reason:String(reason || ""),
@@ -11555,7 +11578,7 @@ function clearOwn(reason, forceLog) {
                 });
                 if (flag !== "00" && !scriptStopping)
                     log("🟠 LAB: ERRO AO LIMPAR MARCAÇÃO. " +
-                        "PARE E ENVIE O ZIP DO LOG.");
+                        "PARE E ENVIE LOG.TXT.");
             } else if (snapshot.ok === true) {
                 markerCleared = true;
             }
@@ -11587,7 +11610,7 @@ function updateNearest(reason) {
 
     // Com a proteção de waypoint ATIVA, um waypoint manual pertence ao jogador.
     // O Turbo Hunter só volta a mover o GPS depois que o jogador limpar esse point.
-    if (PROTECT_SETWAYPOINT && manualWaypointOverride)
+    if (PROTECT_SETWAYPOINT && preserveManualWaypoint(getSingletonMap()))
         return;
 
     if (!pending.length) {
@@ -12246,7 +12269,7 @@ function onRecoveredClue(path, o) {
         sendLabEvent("clue_identity_ambiguous", {
             clue:labSanitizeValue(c, 0), pending:labPendingSnapshot()
         });
-        log("🟠 LAB: PISTA COM IDENTIDADE AMBÍGUA. CONTADOR PRESERVADO; ENVIE O ZIP.");
+        log("🟠 LAB: PISTA COM IDENTIDADE AMBÍGUA. CONTADOR PRESERVADO; ENVIE LOG.TXT.");
         return;
     }
 
@@ -12297,7 +12320,7 @@ function onRecoveredClue(path, o) {
     consecutiveEmptyManualScans = 0;
     if (rawCatalogAssociation.match_count > 0) {
         log("🟠 LAB: PISTA PERTO DE ID SEM DNA; CONTAGEM PROVISÓRIA. " +
-            "COLETE UM CORPO CONFIRMANDO COM ENTER E ENVIE O ZIP. " +
+            "COLETE UM CORPO CONFIRMANDO COM ENTER E ENVIE LOG.TXT. " +
             "A POSIÇÃO NÃO VINCULA ANIMAIS.");
     }
     if (labRecoveryStage !== 0) {
@@ -13256,11 +13279,49 @@ function matchesLastInternalSet(position) {
 }
 
 function protectManualWaypoint() {
+    const alreadyProtected = manualWaypointOverride;
     manualWaypointOverride = true;
     cancelWaypointWork();
     resetMarkerState();
     finalClearDone = true;
-    log("🧭 WAYPOINT DO JOGADOR PROTEGIDO: limpe o point para liberar o GPS automático.");
+    if (!alreadyProtected)
+        log("🧭 WAYPOINT DO JOGADOR PROTEGIDO: remova sua marcação para retomar a busca automática.");
+}
+
+function preserveManualWaypoint(map, snapshot) {
+    if (!PROTECT_SETWAYPOINT)
+        return false;
+    if (!map || map.isNull())
+        return manualWaypointOverride;
+    const flag = labHex(map.add(0x3d3), 1);
+    if (manualWaypointOverride) {
+        // A real inactive map flag also handles a missing ClearWaypoint hook.
+        // Stale catalog entries alone must never release manual protection.
+        if (flag === "00") {
+            releaseManualWaypointProtection();
+            return false;
+        }
+        return true;
+    }
+    if (flag !== "01")
+        return false;
+    // A waypoint present before attaching is not owned by this mod session.
+    if (!markerOwned) {
+        protectManualWaypoint();
+        return true;
+    }
+    if (snapshot && snapshot.ok === true && lastInternalSetPosition &&
+        Array.isArray(snapshot.waypoint_entries) &&
+        snapshot.waypoint_entries.length === 1) {
+        const entry = snapshot.waypoint_entries[0];
+        if (registryWaypointPointer(entry) !== null &&
+            (distanceXZ(entry, lastInternalSetPosition) > 3 ||
+             Math.abs(Number(entry.y) - Number(lastInternalSetPosition.y)) > 6)) {
+            protectManualWaypoint();
+            return true;
+        }
+    }
+    return false;
 }
 
 function releaseManualWaypointProtection() {
@@ -13341,6 +13402,11 @@ function attachOptionalInterceptor(name, address, enabled, callbacks) {
 const setWaypointInterceptor = attachOptionalInterceptor(
     "SetWaypoint", SET_ADDR, setWaypointAddressReady, {
     onEnter(args) {
+        // Only insideSet proves that a call belongs to Turbo Hunter. An
+        // external click near a corpse is still the player's manual marker.
+        if (!insideSet && PROTECT_SETWAYPOINT && !scriptStopping &&
+            !multiplayerBlocked && soloConfirmed)
+            protectManualWaypoint();
         capturedMap = args[0];
         rayXWaitingForManualWaypoint = false;
         hudGpsActionRequired = false;
@@ -13363,7 +13429,8 @@ const setWaypointInterceptor = attachOptionalInterceptor(
         );
 
         // insideSet é uma prova absoluta de que a chamada veio do próprio mod.
-        if (insideSet || scriptStopping || multiplayerBlocked || !soloConfirmed)
+        if (insideSet || scriptStopping || multiplayerBlocked || !soloConfirmed ||
+            PROTECT_SETWAYPOINT)
             return;
 
         const targetPosition = rayXHookTarget;
@@ -14067,8 +14134,8 @@ sendLabEvent("laboratory_loaded", {
     dna_self_test_ok:dnaRuleSelfTest.ok,
     dna_self_test_checks:dnaRuleSelfTest.checks
 });
-log("Turbo Hunter 0.5.7 carregado.");
-log("🧭 TURBO HUNTER 0.5.7: busca e marcação automáticas; F6 atualiza IDs quando necessário.");
+log("Turbo Hunter 0.6.0 carregado.");
+log("🧭 TURBO HUNTER 0.6.0: busca e marcação automáticas; F6 atualiza IDs quando necessário.");
 log("🧭 Você pode caçar livremente; a marcação é automática quando validada.");
 log("🧭 Posição do jogador: leitura direta de três referências validadas; F6 também recupera a posição.");
 log("🧬 DNA: pista identifica o animal; distância entre pista e ID não prova identidade.");
@@ -14090,59 +14157,43 @@ setTimeout(function () {
 """
 
 def prepare_log_files():
-    """Guarda somente a sessão anterior; o log continua pequeno e previsível."""
-    try:
-        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 0:
-            PREVIOUS_LOG_FILE.write_bytes(LOG_FILE.read_bytes())
-    except Exception as exc:
-        print_console("AVISO: nao consegui preservar o log anterior: " + str(exc))
-
+    """Replace the same plain text log; never archive previous sessions."""
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOG_FILE.write_text("", encoding="utf-8")
 
 
 def log(line):
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     text = f"[{stamp}] {line}"
-
+    # Keep even a very long hunt bounded, retaining its most recent messages.
     with log_lock:
-        with LOG_FILE.open("a", encoding="utf-8") as file:
-            file.write(text + "\n")
+        try:
+            encoded = (text + "\n").encode("utf-8", errors="replace")
+            if len(encoded) > MAX_LOG_BYTES // 2:
+                encoded = encoded[-MAX_LOG_BYTES // 2:].decode("utf-8", errors="ignore").encode("utf-8")
+            if LOG_FILE.exists() and LOG_FILE.stat().st_size + len(encoded) > MAX_LOG_BYTES:
+                with LOG_FILE.open("rb") as source:
+                    source.seek(max(0, LOG_FILE.stat().st_size - MAX_LOG_BYTES // 2))
+                    tail = source.read().split(b"\n", 1)[-1]
+                LOG_FILE.write_bytes(tail)
+            with LOG_FILE.open("ab") as file:
+                file.write(encoded)
+        except OSError as exc:
+            print_console("AVISO: nao consegui gravar log.txt: " + str(exc))
         print_console(text)
 
 
 def save_lab_event(event, data=None):
-    """Append one machine-readable record without risking the main tracker."""
-    record = {
-        "saved_at": datetime.now().isoformat(timespec="milliseconds"),
-        "lab_version": LAB_VERSION,
-        "base_version": "0.5.1",
-        "session_id": lab_session_id,
-        "machine_label": MACHINE_LABEL,
-        "event": str(event or "unknown"),
-        "data": data if isinstance(data, dict) else {"value": data},
-    }
-
-    try:
-        line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-        with lab_lock:
-            with LAB_LIVE_FILE.open("a", encoding="utf-8") as file:
-                file.write(line + "\n")
-    except Exception as exc:
-        print_console("AVISO LAB: nao consegui gravar evento: " + str(exc))
+    # No JSONL dumps in the public installer. Operational state is handled below.
+    return None
 
 
 def _read_lab_state_unlocked():
-    sources = [LAB_STATE_FILE]
-    if LEGACY_LAB_STATE_FILE != LAB_STATE_FILE:
-        sources.append(LEGACY_LAB_STATE_FILE)
-    for source in sources:
-        try:
-            data = json.loads(source.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except (OSError, ValueError, TypeError):
-            continue
-    return {}
+    try:
+        data = json.loads(LAB_STATE_FILE.read_text(encoding="utf-8-sig"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
 
 
 def _empty_lab_state(game_identity):
@@ -14307,59 +14358,6 @@ def persist_runtime_state(data):
         )
 
 
-def build_lab_package():
-    """Create one ready-to-send ZIP containing both runs and installer evidence."""
-    root_dir = Path(__file__).resolve().parents[2]
-    runtime_dir = Path(__file__).resolve().parents[1] / "runtime"
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    destination = root_dir / (
-        f"{LAB_PACKAGE_PREFIX}_{MACHINE_LABEL}_{stamp}.zip"
-    )
-    serial = 1
-
-    while destination.exists():
-        destination = root_dir / (
-            f"{LAB_PACKAGE_PREFIX}_{MACHINE_LABEL}_{stamp}_{serial:02d}.zip"
-        )
-        serial += 1
-
-    files = (
-        (LOG_FILE, "logs/turbo_hunter_log.txt"),
-        (PREVIOUS_LOG_FILE, "logs/turbo_hunter_log_anterior.txt"),
-        (LAB_LIVE_FILE, "logs/lab_id_vivo_live.jsonl"),
-        (LAB_STATE_FILE, "logs/lab_id_vivo_state.json"),
-        (HUD_CONFIG_FILE, "hud_config.json"),
-        (runtime_dir / "instalacao.log", "instalacao/instalacao.log"),
-        (runtime_dir / "install_status.json", "instalacao/install_status.json"),
-        (runtime_dir / "install_ok.txt", "instalacao/install_ok.txt"),
-    )
-
-    summary = (
-        "Turbo Hunter 0.5.7\r\n"
-        "Base oficial: 0.5.1\r\n"
-        f"Computador: {MACHINE_LABEL}\r\n"
-        f"Sessao mais recente: {lab_session_id}\r\n"
-        "\r\n"
-        "Este pacote foi criado automaticamente ao encerrar o mod.\r\n"
-        "Envie o ZIP inteiro para analise; nao apague nem edite os arquivos internos.\r\n"
-    )
-
-    try:
-        with zipfile.ZipFile(
-            destination,
-            "w",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=6,
-        ) as archive:
-            archive.writestr("LEIA-ME DA CAPTURA.txt", summary)
-            for source, archive_name in files:
-                if source.exists() and source.is_file():
-                    archive.write(source, arcname=archive_name)
-        return destination
-    except Exception as exc:
-        print_console("AVISO LAB: nao consegui montar o pacote final: " + str(exc))
-        return None
-
 
 HUD_CORNERS = {
     "pt-BR": (
@@ -14415,7 +14413,7 @@ def load_hud_config():
     }
 
     try:
-        loaded = json.loads(HUD_CONFIG_FILE.read_text(encoding="utf-8"))
+        loaded = json.loads(HUD_CONFIG_FILE.read_text(encoding="utf-8-sig"))
         if isinstance(loaded, dict):
             data.update(loaded)
     except Exception:
@@ -14452,6 +14450,7 @@ def load_hud_config():
         "language": language,
         "resolved_language": resolved_language,
         "lab_config_version": LAB_VERSION,
+        "auto_launch_game": bool(data.get("auto_launch_game", False)),
     }
 
 
@@ -14466,9 +14465,28 @@ def save_hud_config(config):
         language = str(config.get("language", "auto") or "auto")
         resolved_language = resolve_language(language)
 
-        HUD_CONFIG_FILE.write_text(
+        existing = {}
+        try:
+            existing = json.loads(HUD_CONFIG_FILE.read_text(encoding="utf-8-sig"))
+            if not isinstance(existing, dict):
+                existing = {}
+        except (OSError, ValueError):
+            pass
+        # Only the settings window changes protection options. HUD/F8 writes
+        # keep the latest saved preferences, including choices made since this
+        # process read its config. Publish atomically so readers never see an
+        # empty/half-written JSON file and fall back to default protections.
+        for key in ("solo_only", "protect_setwaypoint", "language"):
+            if key in existing:
+                config = {**config, key: existing[key]}
+        solo_only = 1 if int(config.get("solo_only", 1)) != 0 else 0
+        protect_setwaypoint = 1 if int(config.get("protect_setwaypoint", 0)) != 0 else 0
+        language = str(config.get("language", "auto") or "auto")
+        resolved_language = resolve_language(language)
+        temporary = HUD_CONFIG_FILE.with_suffix(".core.tmp")
+        temporary.write_text(
             json.dumps(
-                {
+                {**existing,
                     "corner": corner,
                     "name": HUD_CORNERS[resolved_language][corner],
                     "solo_only": solo_only,
@@ -14481,6 +14499,7 @@ def save_hud_config(config):
             ),
             encoding="utf-8",
         )
+        temporary.replace(HUD_CONFIG_FILE)
     except Exception as exc:
         log("AVISO: nao consegui salvar hud_config.json: " + str(exc))
 
@@ -14504,8 +14523,8 @@ def build_js_source(solo_only, protect_setwaypoint, language):
             "__HUD_LAB_CAN_COLLECT_TEXT__": "PODE COLETAR",
             "__HUD_LAB_SEE_CLUE_TEXT__": "EXAMINE PISTA DE SANGUE",
             "__HUD_LAB_ERROR_TEXT__": "ERRO - NAO COLETE",
-            "__HUD_LAB_STOP_TEXT__": "HORA DE PARAR",
-            "__HUD_LAB_SEND_ZIP_TEXT__": "ENVIAR ZIP LOG",
+            "__HUD_LAB_STOP_TEXT__": "VERIFIQUE A MARCACAO",
+            "__HUD_LAB_SEND_ZIP_TEXT__": "TENTE NOVA BUSCA",
             "__HUD_LAB_GPS_ACTION_TEXT__": "REMOVA PONTO NO MAPA",
             "__HUD_LAB_COUNTDOWN_TEXT__": "AGUARDE ",
             "__HUD_LAB_COLLECT_TEXT__": "COLETE UM ANIMAL | RESTAM ",
@@ -14515,7 +14534,7 @@ def build_js_source(solo_only, protect_setwaypoint, language):
             "__HUD_POSITION_WALK_TEXT__": "CAMINHE 20M SEM ATIRAR",
             "__HUD_POSITION_SHOOT_TEXT__": "AGORA ATIRE PARADO",
             "__HUD_POSITION_READY_TEXT__": "POSICAO CONFIRMADA",
-            "__HUD_POSITION_ZIP_TEXT__": "PARE E ENVIE ZIP",
+            "__HUD_POSITION_ZIP_TEXT__": "TENTE NOVA BUSCA",
             "__HUD_POSITION_SCANNING_TEXT__": "BUSCA POSICAO ",
         }
     else:
@@ -14531,8 +14550,8 @@ def build_js_source(solo_only, protect_setwaypoint, language):
             "__HUD_LAB_CAN_COLLECT_TEXT__": "YOU MAY COLLECT",
             "__HUD_LAB_SEE_CLUE_TEXT__": "CHECK BLOOD CLUE",
             "__HUD_LAB_ERROR_TEXT__": "ERROR - DO NOT COLLECT",
-            "__HUD_LAB_STOP_TEXT__": "TIME TO STOP",
-            "__HUD_LAB_SEND_ZIP_TEXT__": "SEND ZIP LOG",
+            "__HUD_LAB_STOP_TEXT__": "CHECK THE WAYPOINT",
+            "__HUD_LAB_SEND_ZIP_TEXT__": "TRY SEARCH AGAIN",
             "__HUD_LAB_GPS_ACTION_TEXT__": "REMOVE MAP WAYPOINT",
             "__HUD_LAB_COUNTDOWN_TEXT__": "WAIT ",
             "__HUD_LAB_COLLECT_TEXT__": "COLLECT ONE ANIMAL | LEFT ",
@@ -14542,7 +14561,7 @@ def build_js_source(solo_only, protect_setwaypoint, language):
             "__HUD_POSITION_WALK_TEXT__": "WALK 20M WITHOUT SHOOTING",
             "__HUD_POSITION_SHOOT_TEXT__": "NOW SHOOT AND STAND STILL",
             "__HUD_POSITION_READY_TEXT__": "POSITION CONFIRMED",
-            "__HUD_POSITION_ZIP_TEXT__": "STOP AND SEND ZIP",
+            "__HUD_POSITION_ZIP_TEXT__": "TRY SEARCH AGAIN",
             "__HUD_POSITION_SCANNING_TEXT__": "POSITION SCAN ",
         }
     hud_source = hud_source.replace("__HUD_WAITING_TEXT__", waiting_text)
@@ -14849,7 +14868,7 @@ def main():
         {
             "python_version": sys.version,
             "process_name": PROCESS_NAME,
-            "lab_live_file": LAB_LIVE_FILE.name,
+            "log_file": LOG_FILE.name,
             "machine_label": MACHINE_LABEL,
         },
     )
@@ -14862,7 +14881,7 @@ def main():
     save_hud_config(config)
 
     print("=" * 72)
-    print(" TURBO HUNTER 0.5.7")
+    print(" TURBO HUNTER 0.6.0")
     print("=" * 72)
     print(" COMPUTADOR:", MACHINE_LABEL)
     print()
@@ -14900,6 +14919,9 @@ def main():
     if session is None:
         return
 
+    # A new game always starts a fresh log, including launches after waiting.
+    prepare_log_files()
+    log("Turbo Hunter 0.6.0 conectado. Protecao SOLO=" + str(solo_only))
     session.on("detached", on_session_detached)
 
     try:
@@ -14973,7 +14995,7 @@ def main():
             )
         if saved_state.get("pending_corpses"):
             log(
-                "MEMÓRIA LAB: " +
+                "ESTADO DA PARTIDA: " +
                 str(len(saved_state.get("pending_corpses", []))) +
                 " cadáver(es) pendente(s) preservado(s) para restauração."
             )
@@ -15025,10 +15047,7 @@ def main():
             pass
 
         save_lab_event("python_session_finished", {"normal_shutdown": True})
-        log("Sessão encerrada; preparando o pacote de suporte.")
-        package = build_lab_package()
-        if package is not None:
-            print_console("PACOTE DE LOG CRIADO: " + str(package))
+        log("Sessão encerrada. Log da sessão: " + str(LOG_FILE))
 
 
 if __name__ == "__main__":
