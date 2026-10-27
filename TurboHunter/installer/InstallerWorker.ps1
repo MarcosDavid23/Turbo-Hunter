@@ -1,4 +1,4 @@
-﻿# Turbo Hunter 0.4.1 - installer worker
+﻿# Turbo Hunter 0.4.4 - installer worker
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -14,7 +14,7 @@ $StatusFile = Join-Path $RuntimeDir 'install_status.json'
 $InstallOk = Join-Path $RuntimeDir 'install_ok.txt'
 $StartTemplate = Join-Path $Here 'INICIAR_TEMPLATE.vbs'
 $StartLauncher = Join-Path $BaseDir 'INICIAR TURBO HUNTER.vbs'
-$InstallLauncher = Join-Path $BaseDir 'INSTALAR TURBO HUNTER.vbs'
+$InstallLauncher = Join-Path $BaseDir 'INSTALAR TURBO HUNTER.cmd'
 $PythonInstaller = Join-Path $RuntimeDir 'python-3.14.7-amd64.exe'
 $PythonUrl = 'https://www.python.org/ftp/python/3.14.7/python-3.14.7-amd64.exe'
 $PythonSha256 = '9d9eb2709ef81bf5cd30db3c2096bdbc4ea10087c22e62f27d356b36f6ae9649'
@@ -29,6 +29,16 @@ New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 function Write-Log([string]$Text) {
     $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     Add-Content -LiteralPath $InstallLog -Value "[$stamp] $Text" -Encoding UTF8
+    Write-Host "[$stamp] $Text"
+}
+
+function Invoke-Logged([string]$Exe, [string[]]$Arguments) {
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $Exe @Arguments 2>&1 | Tee-Object -FilePath $InstallLog -Append | Out-Host
+    $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = $savedPreference
+    return $exitCode
 }
 
 function Set-Status([string]$State, [string]$Title, [string]$Detail, [int]$Step = 0) {
@@ -98,10 +108,10 @@ function Find-Python {
 }
 
 function Ensure-Pip([string]$PythonExe) {
-    & $PythonExe -m pip --version *>> $InstallLog
-    if ($LASTEXITCODE -eq 0) { return }
-    & $PythonExe -m ensurepip --upgrade *>> $InstallLog
-    if ($LASTEXITCODE -ne 0) {
+    $pipExit = Invoke-Logged $PythonExe @('-m', 'pip', '--version')
+    if ($pipExit -eq 0) { return }
+    $ensureExit = Invoke-Logged $PythonExe @('-m', 'ensurepip', '--upgrade')
+    if ($ensureExit -ne 0) {
         throw (T 'O Python foi encontrado, mas o pip não pôde ser preparado.' 'Python was found, but pip could not be prepared.')
     }
 }
@@ -115,7 +125,7 @@ try {
         Set-Status 'working' (T 'Etapa 1 de 3 - Python' 'Step 1 of 3 - Python') (T 'Baixando Python 3.14.7 oficial. Aguarde...' 'Downloading official Python 3.14.7. Please wait...') 1
         if (Test-Path -LiteralPath $PythonInstaller) { Remove-Item -LiteralPath $PythonInstaller -Force -ErrorAction SilentlyContinue }
         $wc = New-Object System.Net.WebClient
-        $wc.Headers.Add('User-Agent', 'TurboHunter/0.4.1')
+        $wc.Headers.Add('User-Agent', 'TurboHunter/0.4.4')
         $wc.DownloadFile($PythonUrl, $PythonInstaller)
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $PythonInstaller).Hash.ToLowerInvariant()
         if ($hash -ne $PythonSha256) {
@@ -126,7 +136,7 @@ try {
         if (Test-Path -LiteralPath $PrivatePythonDir) { Remove-Item -LiteralPath $PrivatePythonDir -Recurse -Force -ErrorAction SilentlyContinue }
         New-Item -ItemType Directory -Force -Path $PrivatePythonDir | Out-Null
         $arguments = '/quiet InstallAllUsers=0 TargetDir="' + $PrivatePythonDir + '" PrependPath=0 AppendPath=0 Include_launcher=0 Include_pip=1 Include_tcltk=1 Include_test=0 Include_doc=0 Shortcuts=0 AssociateFiles=0'
-        $proc = Start-Process -FilePath $PythonInstaller -ArgumentList $arguments -PassThru -Wait -WindowStyle Hidden
+        $proc = Start-Process -FilePath $PythonInstaller -ArgumentList $arguments -PassThru -Wait -WindowStyle Normal
         if ($proc.ExitCode -ne 0) {
             throw ((T 'A instalação do Python terminou com código ' 'Python installation ended with code ') + $proc.ExitCode + '.')
         }
@@ -143,15 +153,14 @@ try {
     if (Test-Path -LiteralPath $PackagesDir) { Remove-Item -LiteralPath $PackagesDir -Recurse -Force -ErrorAction SilentlyContinue }
     New-Item -ItemType Directory -Force -Path $PackagesDir | Out-Null
     Set-Status 'working' (T 'Etapa 2 de 3 - Componentes' 'Step 2 of 3 - Components') ((T 'Baixando e instalando Frida ' 'Downloading and installing Frida ') + $FridaVersion + '...') 2
-    & $PythonExe -m pip install --disable-pip-version-check --no-input --upgrade --target $PackagesDir "frida==$FridaVersion" *>> $InstallLog
-    if ($LASTEXITCODE -ne 0) {
+    $installExit = Invoke-Logged $PythonExe @('-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', '--upgrade', '--target', $PackagesDir, "frida==$FridaVersion")
+    if ($installExit -ne 0) {
         throw (T 'Não foi possível baixar ou instalar o Frida. Verifique a internet ou o bloqueio da rede.' 'Frida could not be downloaded or installed. Check your internet connection or network restrictions.')
     }
 
     $oldPythonPath = $env:PYTHONPATH
     $env:PYTHONPATH = $PackagesDir
-    & $PythonExe -c "import frida, tkinter; print(frida.__version__)" *>> $InstallLog
-    $verifyExit = $LASTEXITCODE
+    $verifyExit = Invoke-Logged $PythonExe @('-c', 'import frida, tkinter; print(frida.__version__)')
     $env:PYTHONPATH = $oldPythonPath
     if ($verifyExit -ne 0) {
         throw (T 'O Frida foi baixado, mas a verificação final falhou.' 'Frida was downloaded, but the final verification failed.')
@@ -159,9 +168,8 @@ try {
 
     Set-Status 'working' (T 'Etapa 3 de 3 - Finalizando' 'Step 3 of 3 - Finishing') (T 'Criando o iniciador do Turbo Hunter...' 'Creating the Turbo Hunter launcher...') 3
     Copy-Item -LiteralPath $StartTemplate -Destination $StartLauncher -Force
-    [System.IO.File]::WriteAllText($InstallOk, "Turbo Hunter 0.4.1`r`n", [System.Text.Encoding]::Unicode)
+    [System.IO.File]::WriteAllText($InstallOk, "Turbo Hunter 0.4.4`r`n", [System.Text.Encoding]::Unicode)
     Remove-Item -LiteralPath $PythonInstaller -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $InstallLauncher -Force -ErrorAction SilentlyContinue
 
     Set-Status 'done' (T 'Instalação concluída' 'Installation complete') (T 'Tudo pronto. Clique em ABRIR TURBO HUNTER.' 'Everything is ready. Click OPEN TURBO HUNTER.') 3
 } catch {

@@ -1,4 +1,4 @@
-# Turbo Hunter 0.4.1 - GUI without CMD window
+# Turbo Hunter 0.4.4 - GUI without CMD window
 import ctypes
 import importlib.util
 import json
@@ -14,7 +14,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-VERSION = "0.4.1"
+VERSION = "0.4.4"
 BASE_DIR = Path(__file__).resolve().parent
 INTERNAL_DIR = BASE_DIR.parent
 ROOT_DIR = INTERNAL_DIR.parent
@@ -28,11 +28,12 @@ if PACKAGES_DIR.exists():
 CORE_FILE = BASE_DIR / "turbo_hunter.py"
 CONFIG_FILE = BASE_DIR / "hud_config.json"
 STOP_FILE = BASE_DIR / ".turbo_hunter_stop"
-INSTALLER_PS1 = INTERNAL_DIR / "installer" / "Installer.ps1"
+INSTALLER_PY = INTERNAL_DIR / "installer" / "installer.py"
 DEER_PNG = ASSETS_DIR / "turbo_hunter_deer.png"
 ICON_PNG = DEER_PNG
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
 
 CORNERS = {
     "pt-BR": (
@@ -58,7 +59,7 @@ TEXT = {
         "config": "CONFIGURAÇÃO",
         "hud_corner": "Canto do HUD",
         "solo_protection": "Proteção SOLO",
-        "solo_help": "Ativada: bloqueia multiplayer. Desativada: multiplayer por conta e risco.",
+        "solo_help": "Ativada (recomendada): bloqueia multiplayer. Desativada: permite jogar com outras pessoas por conta e risco.",
         "waypoint_protection": "Proteção de waypoint",
         "waypoint_on": "Ativada: respeita seu waypoint e espera você limpá-lo para voltar ao GPS.",
         "waypoint_off": "Desativada: o Turbo Hunter pode mover/reassumir o waypoint automaticamente.",
@@ -97,6 +98,10 @@ TEXT = {
         "blocked": "BLOQUEADO",
         "solo_blocked": "A proteção SOLO detectou uma sessão multiplayer.",
         "safe_disconnect": "Turbo Hunter desconectou por segurança.",
+        "unsupported_build": "Esta versão do jogo não é compatível com o Turbo Hunter 0.4.4.",
+        "build_disconnect": "GPS e HUD foram bloqueados antes de processar abates.",
+        "connection_problem": "O jogo foi encontrado, mas a conexão não foi autorizada.",
+        "connection_help": "Tente fechar ambos e iniciar o Turbo Hunter como administrador.",
         "attention": "ATENÇÃO",
         "problem": "O Turbo Hunter encontrou um problema. Consulte os logs se necessário.",
         "error": "ERRO",
@@ -111,7 +116,7 @@ TEXT = {
         "config": "SETTINGS",
         "hud_corner": "HUD corner",
         "solo_protection": "SOLO protection",
-        "solo_help": "Enabled: blocks multiplayer. Disabled: multiplayer at your own risk.",
+        "solo_help": "Enabled (recommended): blocks multiplayer. Disabled: allows playing with others at your own risk.",
         "waypoint_protection": "Waypoint protection",
         "waypoint_on": "Enabled: respects your waypoint and waits until you clear it before returning to GPS.",
         "waypoint_off": "Disabled: Turbo Hunter may automatically move/reclaim the waypoint.",
@@ -150,6 +155,10 @@ TEXT = {
         "blocked": "BLOCKED",
         "solo_blocked": "SOLO protection detected a multiplayer session.",
         "safe_disconnect": "Turbo Hunter disconnected for safety.",
+        "unsupported_build": "This game build is not compatible with Turbo Hunter 0.4.4.",
+        "build_disconnect": "GPS and HUD were blocked before processing kills.",
+        "connection_problem": "The game was found, but the connection was not authorized.",
+        "connection_help": "Close both programs and try starting Turbo Hunter as administrator.",
         "attention": "ATTENTION",
         "problem": "Turbo Hunter found a problem. Check the logs if needed.",
         "error": "ERROR",
@@ -189,7 +198,7 @@ def normalized_config():
         "corner": 3,
         "name": CORNERS["pt-BR"][3],
         "solo_only": 1,
-        "protect_setwaypoint": 1,
+        "protect_setwaypoint": 0,
         "language": "auto",
     }
     try:
@@ -212,9 +221,9 @@ def normalized_config():
         solo_only = 1
 
     try:
-        protect = 1 if int(data.get("protect_setwaypoint", 1)) != 0 else 0
+        protect = 1 if int(data.get("protect_setwaypoint", 0)) != 0 else 0
     except Exception:
-        protect = 1
+        protect = 0
 
     language = str(data.get("language", "auto") or "auto")
     if language.lower() not in ("auto", "en", "pt-br", "pt_br", "pt"):
@@ -444,13 +453,18 @@ class TurboHunterGUI(tk.Tk):
             pass
 
     def _open_repair(self):
-        if not INSTALLER_PS1.exists():
+        if not INSTALLER_PY.exists():
             messagebox.showerror("Turbo Hunter", self.t["repair_failed"])
             return False
         try:
+            python_exe = Path(sys.executable)
+            console_python = python_exe.with_name("python.exe")
+            if not console_python.exists():
+                console_python = python_exe
             subprocess.Popen(
-                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", str(INSTALLER_PS1)],
-                creationflags=CREATE_NO_WINDOW,
+                [str(console_python), str(INSTALLER_PY)],
+                cwd=str(ROOT_DIR),
+                creationflags=CREATE_NEW_CONSOLE,
             )
             return True
         except Exception:
@@ -549,6 +563,16 @@ class TurboHunterGUI(tk.Tk):
             self.status_label.configure(text=self.t["blocked"])
             self.detail_label.configure(text=self.t["solo_blocked"])
             self.activity_label.configure(text=self.t["safe_disconnect"])
+            return
+        if "BUILD NAO SUPORTADA" in line or "BUILD NÃO SUPORTADA" in line:
+            self.status_label.configure(text=self.t["blocked"])
+            self.detail_label.configure(text=self.t["unsupported_build"])
+            self.activity_label.configure(text=self.t["build_disconnect"])
+            return
+        if "ERRO DE CONEXAO" in line:
+            self.status_label.configure(text=self.t["attention"])
+            self.detail_label.configure(text=self.t["connection_problem"])
+            self.activity_label.configure(text=self.t["connection_help"])
             return
         if "ERRO" in line or "falhou" in line.lower():
             self.status_label.configure(text=self.t["attention"])

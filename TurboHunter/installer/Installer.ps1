@@ -1,4 +1,4 @@
-﻿# Turbo Hunter 0.4.1 - GUI installer
+﻿# Turbo Hunter 0.4.4 - GUI installer
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -29,7 +29,7 @@ $success = [Drawing.Color]::FromArgb(69,184,119)
 $danger = [Drawing.Color]::FromArgb(220,91,91)
 
 $form = New-Object Windows.Forms.Form
-$form.Text = T 'Turbo Hunter 0.4.1 - Instalação' 'Turbo Hunter 0.4.1 - Installation'
+$form.Text = T 'Turbo Hunter 0.4.4 - Instalação' 'Turbo Hunter 0.4.4 - Installation'
 $form.ClientSize = New-Object Drawing.Size(650,390)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedSingle'
@@ -51,7 +51,7 @@ if (Test-Path -LiteralPath $DeerPng) {
 $form.Controls.Add($deer)
 
 $title = New-Object Windows.Forms.Label
-$title.Text = 'TURBO HUNTER 0.4.1'
+$title.Text = 'TURBO HUNTER 0.4.4'
 $title.Font = New-Object Drawing.Font('Segoe UI',22,[Drawing.FontStyle]::Bold)
 $title.ForeColor = $text
 $title.BackColor = $bg
@@ -135,7 +135,7 @@ $lastState = ''
 
 function Start-Install {
     if (-not (Test-Path -LiteralPath $WorkerFile)) {
-        [Windows.Forms.MessageBox]::Show((T 'Os arquivos internos do instalador não foram encontrados.' 'Installer internal files were not found.'),'Turbo Hunter 0.4.1','OK','Error') | Out-Null
+        [Windows.Forms.MessageBox]::Show((T 'Os arquivos internos do instalador não foram encontrados.' 'Installer internal files were not found.'),'Turbo Hunter 0.4.4','OK','Error') | Out-Null
         return
     }
     Remove-Item -LiteralPath $StatusFile -Force -ErrorAction SilentlyContinue
@@ -149,9 +149,9 @@ function Start-Install {
     $small.ForeColor = $accent
     $statusTitle.ForeColor = $text
     $statusTitle.Text = T 'Preparando instalação' 'Preparing installation'
-    $statusDetail.Text = T 'Aguarde. O Turbo Hunter fará as etapas automaticamente.' 'Please wait. Turbo Hunter will complete the steps automatically.'
-    $args = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $WorkerFile + '"'
-    $script:worker = Start-Process -FilePath 'powershell.exe' -ArgumentList $args -PassThru -WindowStyle Hidden
+    $statusDetail.Text = T 'Aguarde. O console de log mostrará todas as etapas.' 'Please wait. The log console will show every step.'
+    $args = '-NoProfile -ExecutionPolicy Bypass -File "' + $WorkerFile + '"'
+    $script:worker = Start-Process -FilePath 'powershell.exe' -ArgumentList $args -PassThru -WindowStyle Normal
 }
 
 function Open-TurboHunter {
@@ -159,7 +159,7 @@ function Open-TurboHunter {
         Start-Process -FilePath 'wscript.exe' -ArgumentList ('"' + $StartLauncher + '"')
         $form.Close()
     } else {
-        [Windows.Forms.MessageBox]::Show((T 'O iniciador ainda não foi criado. Execute a instalação novamente.' 'The launcher has not been created yet. Run the installation again.'),'Turbo Hunter 0.4.1','OK','Error') | Out-Null
+        [Windows.Forms.MessageBox]::Show((T 'O iniciador ainda não foi criado. Execute a instalação novamente.' 'The launcher has not been created yet. Run the installation again.'),'Turbo Hunter 0.4.4','OK','Error') | Out-Null
     }
 }
 
@@ -198,7 +198,7 @@ $timer.Add_Tick({
                 $button.Enabled = $true; $button.Text = T 'TENTAR NOVAMENTE' 'TRY AGAIN'; $button.BackColor = $accent
                 $elapsed.Text = ''
                 $logHint = T 'Detalhes: TurboHunter\runtime\instalacao.log' 'Details: TurboHunter\runtime\instalacao.log'
-                [Windows.Forms.MessageBox]::Show(([string]$data.detail + "`r`n`r`n" + $logHint),'Turbo Hunter 0.4.1','OK','Error') | Out-Null
+                [Windows.Forms.MessageBox]::Show(([string]$data.detail + "`r`n`r`n" + $logHint),'Turbo Hunter 0.4.4','OK','Error') | Out-Null
             }
         } catch {}
     } elseif ($script:worker -and $script:worker.HasExited -and $script:lastState -eq 'working') {

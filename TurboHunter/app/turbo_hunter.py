@@ -1,4 +1,4 @@
-# Turbo Hunter 0.4.1
+# Turbo Hunter 0.4.4
 # theHunter: Call of the Wild
 # Kill Locator / Localizador de Abates
 # Configurações de segurança e waypoint: hud_config.json
@@ -17,7 +17,7 @@ try:
     import frida
 except ImportError:
     print("ERRO: Frida nao instalado.")
-    print("Execute INSTALAR_TURBO_HUNTER.vbs para preparar o mod.")
+    print('Execute "INSTALAR TURBO HUNTER.cmd" para preparar o mod.')
     input("ENTER para sair...")
     raise SystemExit(1)
 
@@ -38,6 +38,7 @@ JS = r"""
 const HUD_C_SOURCE = "__HUD_C_SOURCE_PLACEHOLDER__";
 const SOLO_ONLY_PROTECTION = __SOLO_ONLY_PLACEHOLDER__;
 const PROTECT_SETWAYPOINT = __PROTECT_SETWAYPOINT_PLACEHOLDER__;
+const TARGET_GAME_BUILD = "3304878";
 
 const BASE = Process.mainModule.base;
 
@@ -52,6 +53,40 @@ const SET_ADDR     = BASE.add(RVA_SET_WAYPOINT);
 const CLEAR_ADDR   = BASE.add(RVA_CLEAR_WAYPOINT);
 const MAP_SLOT     = BASE.add(RVA_MAP_SINGLETON);
 const GET_ENTITY   = BASE.add(RVA_GET_PLAYER_ENTITY);
+
+function validateNativeRva(name, rva, address, requireExecute) {
+    const moduleSize = Number(Process.mainModule.size);
+
+    if (!Number.isFinite(moduleSize) || moduleSize <= 0 ||
+        rva < 0 || rva >= moduleSize) {
+        throw new Error(
+            `BUILD/ENDERECO INCOMPATIVEL: ${name} fora do modulo principal ` +
+            `(build suportada ${TARGET_GAME_BUILD}).`
+        );
+    }
+
+    if (typeof Process.findRangeByAddress !== "function") {
+        throw new Error(
+            `BUILD/ENDERECO INCOMPATIVEL: Frida nao conseguiu validar ${name}.`
+        );
+    }
+
+    const range = Process.findRangeByAddress(address);
+    const protection = range ? String(range.protection || "") : "";
+
+    if (!range || protection.indexOf("r") < 0 ||
+        (requireExecute && protection.indexOf("x") < 0)) {
+        throw new Error(
+            `BUILD/ENDERECO INCOMPATIVEL: ${name} nao possui a protecao esperada ` +
+            `(build suportada ${TARGET_GAME_BUILD}).`
+        );
+    }
+}
+
+validateNativeRva("SetWaypoint", RVA_SET_WAYPOINT, SET_ADDR, true);
+validateNativeRva("ClearWaypoint", RVA_CLEAR_WAYPOINT, CLEAR_ADDR, true);
+validateNativeRva("GetPlayerEntity", RVA_GET_PLAYER_ENTITY, GET_ENTITY, true);
+validateNativeRva("MapSingleton", RVA_MAP_SINGLETON, MAP_SLOT, false);
 
 const SetWaypoint   = new NativeFunction(SET_ADDR, 'void', ['pointer', 'pointer']);
 const ClearWaypoint = new NativeFunction(CLEAR_ADDR, 'void', ['pointer']);
@@ -80,10 +115,14 @@ let markerOwned = false;
 let finalClearDone = false;
 let manualWaypointOverride = false;
 let scriptStopping = false;
+let unsupportedBuildBlocked = false;
+let detectedGameBuild = "";
 
 let insideSet = false;
 let insideClear = false;
 let internalHookIgnoreUntil = 0;
+let lastInternalSetPosition = null;
+let lastInternalSetAt = 0;
 let lastExternalHookKind = "";
 let lastExternalHookAt = 0;
 
@@ -133,6 +172,7 @@ const reqBodies = {};
 const reqProcessed = {};
 const seenDeaths = new Set();
 const seenHarvests = new Set();
+const seenRecoveredClues = new Set();
 
 function log(text) {
     send({type:"log", text:text});
@@ -140,6 +180,10 @@ function log(text) {
 
 function notifyBlock(reason) {
     send({type:"multiplayer_block", reason:reason});
+}
+
+function notifyFatalBlock(reason) {
+    send({type:"fatal_block", reason:reason});
 }
 
 function sendGpsStatus(event, message) {
@@ -706,9 +750,69 @@ function beginInternalHookWindow() {
     );
 }
 
-function internalHookActive(kind) {
-    return scriptStopping || Date.now() <= internalHookIgnoreUntil ||
-        (kind === "set" ? insideSet : insideClear);
+function buildNumberFromVersion(value) {
+    const text = String(value || "");
+    const match = /(?:final|build)[_\- ]?(\d{6,})/i.exec(text);
+    return match ? match[1] : "";
+}
+
+function blockUnsupportedBuild(detectedBuild, fullVersion) {
+    if (unsupportedBuildBlocked || scriptStopping)
+        return;
+
+    unsupportedBuildBlocked = true;
+    detectedGameBuild = detectedBuild || "desconhecida";
+
+    const shouldClear = markerOwned || currentKey !== "";
+    pending = [];
+    manualWaypointOverride = false;
+    cancelHudWarning(true);
+    cancelReserveCandidate();
+    cancelWaypointWork();
+
+    if (shouldClear)
+        clearMarkerInternal();
+
+    resetMarkerState();
+    finalClearDone = true;
+
+    if (nearestInterval !== null) {
+        try { clearInterval(nearestInterval); }
+        catch (_) {}
+        nearestInterval = null;
+    }
+
+    scriptStopping = true;
+    const reason =
+        `BUILD NAO SUPORTADA: detectada ${detectedGameBuild}; ` +
+        `esta versao exige ${TARGET_GAME_BUILD}` +
+        (fullVersion ? ` (${fullVersion})` : "") + ".";
+    log("⛔ " + reason);
+    log("⛔ GPS desativado antes de processar abates para evitar endereco incorreto.");
+    sendGpsStatus("unsupported_build", reason);
+    shutdownHud();
+    notifyFatalBlock(reason);
+}
+
+function inspectGameBuild(o) {
+    if (!o || typeof o !== "object" ||
+        !Object.prototype.hasOwnProperty.call(o, "version"))
+        return !unsupportedBuildBlocked;
+
+    const fullVersion = String(o.version || "");
+    const build = buildNumberFromVersion(fullVersion);
+
+    if (build === "")
+        return !unsupportedBuildBlocked;
+
+    detectedGameBuild = build;
+
+    if (build !== TARGET_GAME_BUILD) {
+        blockUnsupportedBuild(build, fullVersion);
+        return false;
+    }
+
+    return true;
 }
 
 // -----------------------------------------------------------
@@ -725,6 +829,7 @@ function blockMultiplayer(reason) {
 
     const shouldClear = markerOwned || currentKey !== "";
     pending = [];
+    manualWaypointOverride = false;
     cancelHudWarning(true);
     cancelReserveCandidate();
     cancelWaypointWork();
@@ -776,8 +881,12 @@ function commitReserveChange(nextReserve) {
         discarded > 0 || hadWaypointWork
     );
 
+    // Um waypoint manual da reserva anterior nunca pode bloquear a nova.
+    manualWaypointOverride = false;
+
     seenDeaths.clear();
     seenHarvests.clear();
+    seenRecoveredClues.clear();
     capturedMap = ptr(0);
     cachedEntity = ptr(0);
     playerPosConfirmed = false;
@@ -851,6 +960,9 @@ function inspectSession(path, o) {
 
     if (!o || typeof o !== "object")
         return !multiplayerBlocked;
+
+    if (!inspectGameBuild(o))
+        return false;
 
     if (SOLO_ONLY_PROTECTION &&
         (o.is_multiplayer === true || o.is_multiplayer === 1)) {
@@ -1047,6 +1159,15 @@ function finishSet(index, wantedKey, serial, reason) {
         WAYPOINT_VECTOR.add(4).writeFloat(Number(c.y));
         WAYPOINT_VECTOR.add(8).writeFloat(Number(c.z));
 
+        // Preserva a assinatura espacial mesmo se o cadáver for coletado
+        // antes de um callback atrasado do próprio SetWaypoint chegar.
+        lastInternalSetPosition = {
+            x:Number(c.x),
+            y:Number(c.y),
+            z:Number(c.z)
+        };
+        lastInternalSetAt = Date.now();
+
         beginInternalHookWindow();
         insideSet = true;
 
@@ -1174,6 +1295,94 @@ nearestInterval = setInterval(function () {
 // -----------------------------------------------------------
 // MORTE / COLETA
 // -----------------------------------------------------------
+
+function pendingMatchesRecoveredClue(candidate) {
+    for (let i=0; i<pending.length; i++) {
+        const corpse = pending[i];
+
+        if (!sameSpecies(corpse.species, candidate.species) ||
+            !sameWeight(corpse.weight, candidate.weight))
+            continue;
+
+        if (hasValue(corpse.gender) && hasValue(candidate.gender) &&
+            !sameValue(corpse.gender, candidate.gender))
+            continue;
+
+        return true;
+    }
+
+    return false;
+}
+
+function onRecoveredClue(path, o) {
+    if (multiplayerBlocked || scriptStopping || !o)
+        return;
+
+    // state 7 foi confirmado nos testes como animal morto. Os campos
+    // animal_x/y/z apontam para o cadáver, não para a pista examinada.
+    if (Number(o.state) !== 7)
+        return;
+
+    if (!inspectSession(path, o) || !soloConfirmed)
+        return;
+
+    const animalId = String(o.animal_id ?? "").trim();
+
+    if (animalId === "" || animalId === "0" ||
+        !hasValue(o.animal_x) || !hasValue(o.animal_y) ||
+        !hasValue(o.animal_z))
+        return;
+
+    const x = finiteNumber(o.animal_x);
+    const y = finiteNumber(o.animal_y);
+    const z = finiteNumber(o.animal_z);
+
+    if (x === null || y === null || z === null)
+        return;
+
+    const reserve = o.reserve ?? activeReserve;
+    const recoveryKey = `${reserve ?? ""}|${animalId}`;
+
+    if (seenRecoveredClues.has(recoveryKey))
+        return;
+
+    seenRecoveredClues.add(recoveryKey);
+
+    const c = {
+        reserve:reserve,
+        species:o.species,
+        weight:finiteNumber(o.weight),
+        gender:o.gender,
+        difficulty:null,
+        x:x,
+        y:y,
+        z:z,
+        special_tag:"",
+        recovered_animal_id:animalId,
+        recovered_from_clue:true,
+        time:Date.now()
+    };
+
+    // Se o AnimalDeathEvent já registrou este mesmo animal, a pista não
+    // cria uma segunda entrada para o mesmo cadáver.
+    if (pendingMatchesRecoveredClue(c))
+        return;
+
+    pending.push(c);
+    finalClearDone = false;
+
+    if (!PROTECT_SETWAYPOINT)
+        manualWaypointOverride = false;
+
+    log(
+        `☠️ CADAVER GUARDADO #${pending.length} (RECUPERADO POR PISTA) -> ` +
+        `${corpseDesc(c)} | animal_id=${animalId} | dna=${corpseDna(c)}`
+    );
+    updateHudWarningForCount();
+    sendGpsStatus("death", `recuperado por pista | ${corpseDesc(c)}`);
+
+    scheduleNearestUpdate(220, "cadáver recuperado por pista");
+}
 
 function onDeath(path, o) {
     if (multiplayerBlocked || scriptStopping)
@@ -1459,6 +1668,15 @@ function findPendingAtPosition(position) {
     return -1;
 }
 
+function matchesLastInternalSet(position) {
+    if (!position || !lastInternalSetPosition ||
+        Date.now() - lastInternalSetAt > INTERNAL_HOOK_COOLDOWN_MS)
+        return false;
+
+    return distanceXZ(position, lastInternalSetPosition) <= 0.75 &&
+        Math.abs(Number(position.y) - Number(lastInternalSetPosition.y)) <= 3;
+}
+
 function protectManualWaypoint() {
     manualWaypointOverride = true;
     cancelWaypointWork();
@@ -1521,23 +1739,38 @@ Interceptor.attach(SET_ADDR, {
     onEnter(args) {
         capturedMap = args[0];
 
-        if (internalHookActive("set") || multiplayerBlocked || !soloConfirmed)
+        // insideSet é uma prova absoluta de que a chamada veio do próprio mod.
+        if (insideSet || scriptStopping || multiplayerBlocked || !soloConfirmed)
             return;
 
         const targetPosition = readHookPosition(args[1]);
         const matchingIndex = pending.length ? findPendingAtPosition(targetPosition) : -1;
         const nearestIndex = pending.length ? findNearestIndex(getPlayerPos()) : -1;
+        const matchingKey = matchingIndex >= 0
+            ? corpseKey(pending[matchingIndex])
+            : "";
+        const matchesExpectedGpsTarget = matchingIndex >= 0 &&
+            (matchingIndex === nearestIndex || matchingKey === currentKey ||
+             matchingKey === switchingKey);
 
         // Mesmo se um callback interno chegar atrasado, a posição denuncia
         // que este SetWaypoint já é exatamente o alvo correto do GPS.
-        if (matchingIndex >= 0 && matchingIndex === nearestIndex) {
-            currentKey = corpseKey(pending[matchingIndex]);
+        if (matchesExpectedGpsTarget) {
+            currentKey = matchingKey;
             currentIndex = matchingIndex;
             switchingKey = "";
             markerOwned = true;
             manualWaypointOverride = false;
             return;
         }
+
+        // Durante a janela interna, callback sem posição ou apontando para algum
+        // cadáver conhecido ainda pode ser eco atrasado do jogo. Um alvo válido
+        // e realmente diferente, porém, é waypoint novo do jogador e continua.
+        if (Date.now() <= internalHookIgnoreUntil &&
+            (targetPosition === null || matchingIndex >= 0 ||
+             matchesLastInternalSet(targetPosition)))
+            return;
 
         // 1 = protege o waypoint DO JOGADOR. O Turbo Hunter espera o jogador
         // limpar o point antes de voltar a mover o GPS, mesmo com novo abate.
@@ -1564,7 +1797,7 @@ Interceptor.attach(CLEAR_ADDR, {
     onEnter(args) {
         capturedMap = args[0];
 
-        if (internalHookActive("clear") || multiplayerBlocked || !soloConfirmed)
+        if (insideClear || scriptStopping || multiplayerBlocked || !soloConfirmed)
             return;
 
         // Se havia um waypoint manual protegido, o Clear do jogador é justamente
@@ -1573,6 +1806,11 @@ Interceptor.attach(CLEAR_ADDR, {
             releaseManualWaypointProtection();
             return;
         }
+
+        // Sem estado manual para liberar, preserva o cooldown contra ecos do
+        // próprio ClearWaypoint e evita ciclos de limpar/reaplicar.
+        if (Date.now() <= internalHookIgnoreUntil)
+            return;
 
         if (!pending.length)
             return;
@@ -1643,6 +1881,12 @@ function handleBody(path, body) {
 
     if (multiplayerBlocked)
         return;
+
+    if (low.indexOf("eventanimalclueinteraction") >= 0) {
+        if (o)
+            onRecoveredClue(path, o);
+        return;
+    }
 
     if (
         low.indexOf("animaldeathevent") >= 0 ||
@@ -1752,6 +1996,7 @@ function shutdownGps(reason) {
     scriptStopping = true;
     const shouldClear = markerOwned || currentKey !== "";
     pending = [];
+    manualWaypointOverride = false;
     cancelHudWarning(true);
     cancelReserveCandidate();
     cancelWaypointWork();
@@ -1806,6 +2051,9 @@ rpc.exports = {
             active_reserve:activeReserve,
             reserve_candidate:reserveCandidate,
             reserve_candidate_pending:reserveCandidateTimer !== null,
+            target_game_build:TARGET_GAME_BUILD,
+            detected_game_build:detectedGameBuild,
+            unsupported_build_blocked:unsupportedBuildBlocked,
             hud_corner:hudCorner,
             hud_corner_name:hudCornerName(hudCorner),
             hud_loaded:hudModule !== null,
@@ -1846,7 +2094,8 @@ sendGpsStatus(
 );
 initHudAutoVisibility();
 hudInitTimer = setTimeout(initHud, 700);
-log("Turbo Hunter Kill Locator 0.4.1 carregado.");
+log("Turbo Hunter Kill Locator 0.4.4 carregado.");
+log(`🛡️ Build suportada ${TARGET_GAME_BUILD}; endereços nativos validados.`);
 if (SOLO_ONLY_PROTECTION)
     log("🔒 PROTEÇÃO SOLO ATIVA: multiplayer será bloqueado.");
 else
@@ -1923,7 +2172,7 @@ def load_hud_config():
         "corner": 3,
         "name": HUD_CORNERS["pt-BR"][3],
         "solo_only": 1,
-        "protect_setwaypoint": 1,
+        "protect_setwaypoint": 0,
         "language": "auto",
     }
 
@@ -1948,9 +2197,9 @@ def load_hud_config():
         solo_only = 1
 
     try:
-        protect_setwaypoint = 1 if int(data.get("protect_setwaypoint", 1)) != 0 else 0
+        protect_setwaypoint = 1 if int(data.get("protect_setwaypoint", 0)) != 0 else 0
     except Exception:
-        protect_setwaypoint = 1
+        protect_setwaypoint = 0
 
     language = str(data.get("language", "auto") or "auto")
     if language.lower() not in ("auto", "en", "pt-br", "pt_br", "pt"):
@@ -1974,7 +2223,7 @@ def save_hud_config(config):
             corner = 1
 
         solo_only = 1 if int(config.get("solo_only", 1)) != 0 else 0
-        protect_setwaypoint = 1 if int(config.get("protect_setwaypoint", 1)) != 0 else 0
+        protect_setwaypoint = 1 if int(config.get("protect_setwaypoint", 0)) != 0 else 0
         language = str(config.get("language", "auto") or "auto")
         resolved_language = resolve_language(language)
 
@@ -2080,6 +2329,11 @@ def on_message(message, data):
         log("PROTECAO SOLO acionada: " + reason)
         stop_event.set()
 
+    elif payload.get("type") == "fatal_block":
+        reason = payload.get("reason", "falha de compatibilidade")
+        log("ERRO DE COMPATIBILIDADE: " + reason)
+        stop_event.set()
+
 
 def on_session_detached(reason, crash=None):
     if expected_detach_event.is_set():
@@ -2153,6 +2407,8 @@ def gui_stop_requested():
 
 def wait_for_game():
     log("AGUARDANDO JOGO: abra theHunter: Call of the Wild.")
+    last_attach_error = ""
+    last_attach_error_at = 0.0
 
     while not stop_event.is_set():
         if gui_stop_requested():
@@ -2164,8 +2420,22 @@ def wait_for_game():
             session = frida.attach(PROCESS_NAME)
             log("JOGO DETECTADO: conectando Turbo Hunter.")
             return session
-        except Exception:
+        except frida.ProcessNotFoundError:
             time.sleep(1.5)
+        except Exception as exc:
+            now = time.monotonic()
+            error_text = str(exc).strip() or exc.__class__.__name__
+
+            if error_text != last_attach_error or now - last_attach_error_at >= 15.0:
+                log(
+                    "ERRO DE CONEXAO: o jogo parece estar aberto, mas o Turbo Hunter "
+                    "nao conseguiu conectar. Feche ambos, execute o Turbo Hunter como "
+                    "administrador e tente novamente. Detalhe: " + error_text
+                )
+                last_attach_error = error_text
+                last_attach_error_at = now
+
+            time.sleep(2.0)
 
     return None
 
@@ -2187,7 +2457,7 @@ def main():
     save_hud_config(config)
 
     print("=" * 72)
-    print(" TURBO HUNTER KILL LOCATOR 0.4.1")
+    print(" TURBO HUNTER KILL LOCATOR 0.4.4")
     print("=" * 72)
     print()
     if resolved_language == "pt-BR":
