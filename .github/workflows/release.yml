@@ -40,14 +40,57 @@ jobs:
           $existingText = gh api "repos/$env:GH_REPO/releases/tags/$($release.tag)" 2>$null
           if ($LASTEXITCODE -eq 0) {
             $existing = $existingText | ConvertFrom-Json
-            if (-not $existing.draft -or $existing.target_commitish -ne $env:GITHUB_SHA) {
-              throw 'A published release or a release for another commit already uses this tag.'
+            if ($existing.immutable) { throw 'The release is immutable.' }
+            if ($release.replace_existing) {
+              $approved = $release.replace_existing
+              if ($existing.id -ne $approved.release_id -or $existing.draft) {
+                throw 'Existing release differs from the approved replacement.'
+              }
+              $assets = @($existing.assets)
+              $assetName = Split-Path $release.asset -Leaf
+              if ($assets.Count -ne 1 -or $assets[0].name -ne $assetName) {
+                throw 'Release assets differ from the approved replacement.'
+              }
+              $allowedDigests = @("sha256:$($approved.previous_sha256)", "sha256:$($release.sha256)")
+              if ($assets[0].digest -notin $allowedDigests) {
+                throw 'The published ZIP changed since the replacement was approved.'
+              }
+              $tagText = gh api "repos/$env:GH_REPO/git/ref/tags/$($release.tag)"
+              if ($LASTEXITCODE -ne 0) { throw 'Could not verify the release tag.' }
+              $tag = $tagText | ConvertFrom-Json
+              if ($tag.object.type -ne 'commit' -or $tag.object.sha -notin @($approved.previous_commit, $env:GITHUB_SHA)) {
+                throw 'The release tag changed since the replacement was approved.'
+              }
+              if ($existing.target_commitish -notin @($approved.previous_commit, $env:GITHUB_SHA)) {
+                throw 'The release target changed since the replacement was approved.'
+              }
+              gh release upload $release.tag $release.asset --clobber
+              if ($LASTEXITCODE -ne 0) { throw 'Could not replace the approved ZIP.' }
+              gh api --method PATCH "repos/$env:GH_REPO/git/refs/tags/$($release.tag)" -f "sha=$env:GITHUB_SHA" -F force=true
+              if ($LASTEXITCODE -ne 0) { throw 'Could not update the release tag.' }
+              gh release edit $release.tag --target $env:GITHUB_SHA --title $release.title --notes-file $release.notes --latest
+              if ($LASTEXITCODE -ne 0) { throw 'Could not update the release notes.' }
+            } else {
+              if (-not $existing.draft -or $existing.target_commitish -ne $env:GITHUB_SHA) {
+                throw 'A published release or a release for another commit already uses this tag.'
+              }
+              gh release upload $release.tag $release.asset --clobber
+              if ($LASTEXITCODE -ne 0) { throw 'Could not attach the approved ZIP.' }
+              gh release edit $release.tag --draft=false --latest
+              if ($LASTEXITCODE -ne 0) { throw 'Could not publish the release.' }
             }
-            gh release upload $release.tag $release.asset --clobber
-            if ($LASTEXITCODE -ne 0) { throw 'Could not attach the approved ZIP.' }
           } else {
+            if ($release.replace_existing) { throw 'The release approved for replacement was not found.' }
             gh release create $release.tag $release.asset --target $env:GITHUB_SHA --draft --title $release.title --notes-file $release.notes
             if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the release.' }
+            gh release edit $release.tag --draft=false --latest
+            if ($LASTEXITCODE -ne 0) { throw 'Could not publish the release.' }
           }
-          gh release edit $release.tag --draft=false --latest
-          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the release.' }
+          $verifiedText = gh api "repos/$env:GH_REPO/releases/tags/$($release.tag)"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the published release.' }
+          $verified = $verifiedText | ConvertFrom-Json
+          $asset = @($verified.assets | Where-Object name -eq (Split-Path $release.asset -Leaf))
+          if ($verified.draft -or $verified.target_commitish -ne $env:GITHUB_SHA -or $asset.Count -ne 1 -or $asset[0].digest -ne "sha256:$($release.sha256)") {
+            throw 'Published release verification failed.'
+          }
+          Write-Host 'Published release matches the approved ZIP and commit.'

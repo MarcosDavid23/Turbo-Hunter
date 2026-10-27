@@ -170,6 +170,8 @@ TEXT = {'pt-BR': {'subtitle': 'Abates e marcação automática • theHunter: Ca
            'connection_problem': 'O jogo foi encontrado, mas a conexão não foi autorizada.',
            'connection_help': 'Feche e abra o mod para tentar conectar novamente.',
            'attention': 'ATENÇÃO',
+           'map_checking': 'Conferindo a limpeza da marcação. Aguarde.',
+           'map_cleanup_problem': 'Não foi possível confirmar a limpeza da marcação. Remova o ponto no mapa para continuar.',
            'problem': 'Não foi possível concluir esta ação.',
            'error': 'ERRO',
            'waiting_connect': 'Aguardando o Turbo Hunter conectar ao jogo...',
@@ -270,6 +272,8 @@ TEXT = {'pt-BR': {'subtitle': 'Abates e marcação automática • theHunter: Ca
         'connection_problem': 'The game was found, but the connection was not authorized.',
         'connection_help': 'Close and reopen the mod to try connecting again.',
         'attention': 'ATTENTION',
+        'map_checking': 'Checking waypoint cleanup. Please wait.',
+        'map_cleanup_problem': 'Waypoint cleanup could not be confirmed. Remove the point on the map to continue.',
         'problem': 'Could not complete this action.',
         'error': 'ERROR',
         'waiting_connect': 'Waiting for Turbo Hunter to connect to the game...',
@@ -363,6 +367,8 @@ TEXT = {'pt-BR': {'subtitle': 'Abates e marcação automática • theHunter: Ca
            'connection_problem': '已找到游戏，但连接失败。',
            'connection_help': '请关闭并重新打开模组以再次连接。',
            'attention': '注意',
+           'map_checking': '正在确认标记是否已清除，请稍候。',
+           'map_cleanup_problem': '无法确认标记已清除。请在地图上移除该标记后继续。',
            'problem': '无法完成此操作。',
            'error': '错误',
            'waiting_connect': '正在等待游戏连接…',
@@ -536,6 +542,7 @@ class TurboHunterGUI(tk.Tk):
         self._last_pending = 0
         self._activity_hold_until = 0.0
         self._memory_scan_active = False
+        self._map_warning_active = False
         self.config_data = normalized_config()
         self.lang = resolve_language(self.config_data.get("language", "auto"))
         self.t = TEXT[self.lang]
@@ -947,6 +954,7 @@ class TurboHunterGUI(tk.Tk):
             )
 
     def _finish_stopped(self):
+        self._map_warning_active = False
         self.process = None
         self._starting = False
         self._memory_scan_active = False
@@ -968,6 +976,8 @@ class TurboHunterGUI(tk.Tk):
             pass
 
     def _set_active(self):
+        if getattr(self, "_map_warning_active", False):
+            return
         self.status_label.configure(text=self.t["active"])
         self.detail_label.configure(text=self.t["gps_pending"].format(count=self._last_pending))
 
@@ -975,7 +985,26 @@ class TurboHunterGUI(tk.Tk):
         if not line:
             return
 
+        if "GPS: LIMPEZA PENDENTE." in line:
+            self._map_warning_active = True
+            self._activity_hold_until = float("inf")
+            self.status_label.configure(text=self.t["attention"])
+            self.detail_label.configure(text=self.t["map_checking"])
+            self.activity_label.configure(text=self.t["map_checking"])
+            return
+
+        if any(token in line for token in ("GPS CONFIRMADO:", "GPS limpo", "WAYPOINT DO JOGADOR PROTEGIDO")):
+            if getattr(self, "_map_warning_active", False):
+                self._map_warning_active = False
+                self._activity_hold_until = 0.0
+                self._set_active()
+                self.activity_label.configure(text=self.t["no_activity"])
+            if "GPS CONFIRMADO:" in line:
+                return
+
         if "🟢 LAB:" in line:
+            if getattr(self, "_map_warning_active", False):
+                return
             self._memory_scan_active = False
             self._activity_hold_until = 0.0
             self.activity_label.configure(text=self.t["no_activity"])
@@ -987,8 +1016,13 @@ class TurboHunterGUI(tk.Tk):
             # localized message. A warning is not a request to stop the process.
             message = line.split("🟠 LAB:", 1)[-1].upper()
             self._activity_hold_until = time.monotonic() + 15.0
-            if any(token in message for token in ("ERRO", "FALH", "NÃO CONSEGUI", "NAO CONSEGUI", "ENVIE", "ENVIAR", "HORA DE PARAR", "INATIVA")):
+            if any(token in message for token in ("ERRO", "FALH", "NÃO CONSEGUI", "NAO CONSEGUI", "NÃO FOI POSSÍVEL", "NAO FOI POSSIVEL", "ENVIE", "ENVIAR", "HORA DE PARAR", "INATIVA")):
                 key = "map_problem" if any(token in message for token in ("MARCAÇÃO", "PONTO", "WAYPOINT")) else "lab_error_zip"
+                if key == "map_problem" and any(token in message for token in ("LIMPAR", "LIMPEZA")):
+                    key = "map_cleanup_problem"
+                if key in ("map_problem", "map_cleanup_problem"):
+                    self._map_warning_active = True
+                    self._activity_hold_until = float("inf")
                 self.status_label.configure(text=self.t["attention"])
                 self.detail_label.configure(text=self.t[key])
                 self.activity_label.configure(text=self.t[key])

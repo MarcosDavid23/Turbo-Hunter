@@ -385,6 +385,8 @@ let switchingKey = "";
 let switchSerial = 0;
 let markerOwned = false;
 let finalClearDone = false;
+let markerClearAttempts = 0;
+let markerClearWarningIssued = false;
 let manualWaypointOverride = false;
 let scriptStopping = false;
 let unsupportedBuildBlocked = false;
@@ -11352,6 +11354,8 @@ function finishSet(index, wantedKey, serial, reason) {
             preferredWaypointKey = "";
         switchingKey = "";
         markerOwned = true;
+        markerClearAttempts = 0;
+        markerClearWarningIssued = false;
 
         const pp = getPlayerPos();
         const d = pp ? distanceXZ(pp, c) : null;
@@ -11452,6 +11456,9 @@ function verifyAutoWaypointInRegistry(key, target, reason, serial) {
         verified:verified
     });
     if (verified) {
+        if (markerOwned && !manualWaypointOverride && key === currentKey &&
+            pending.some(function (item) { return corpseKey(item) === key; }))
+            log("🧭 GPS CONFIRMADO: marcação do animal conferida.");
         delete waypointInactiveRetries[key];
         return;
     }
@@ -11529,63 +11536,55 @@ function clearOwn(reason, forceLog) {
     const hadMarker = markerOwned || currentKey !== "";
     const hadWork = hadMarker || switchingKey !== "" || switchTimer !== null ||
         externalReapplyTimer !== null || nearestUpdateTimer !== null;
-
-    if (!hadWork && finalClearDone)
+    const hadCleanup = markerClearAttempts > 0;
+    if (!hadWork && finalClearDone && !hadCleanup)
         return;
-
     cancelWaypointWork();
 
     let markerCleared = !hadMarker;
-    if (hadMarker && !finalClearDone) {
-        const restored = restoreRegistryWaypointFallback(reason);
-        markerCleared = restored || clearMarkerInternal();
+    if (hadMarker && !finalClearDone && markerClearAttempts < 3) {
+        markerClearAttempts++;
+        markerCleared = restoreRegistryWaypointFallback(reason) || clearMarkerInternal();
         if (PROTECT_SETWAYPOINT && manualWaypointOverride)
             return;
-        if (!markerCleared) {
-            sendLabEvent("waypoint_auto_clear_unavailable", {
-                reason:String(reason || ""),
-                pending:labPendingSnapshot(),
-                current_key:currentKey,
-                captured_clear_function_validated:
-                    capturedClearCheckDone && !capturedClearRejected
-            });
-        }
     }
-
+    if (hadMarker || hadCleanup) {
+        try {
+            const map = getMap();
+            const flag = map.isNull() ? "" : labHex(map.add(0x3d3), 1);
+            // Ownership must remain available until verification finishes.
+            // A manual point is preserved even when the previous clear failed.
+            if (flag !== "00") {
+                const snapshot = labCollectRegistry(false);
+                if (preserveManualWaypoint(map, snapshot))
+                    return;
+            }
+            // Catalog entries can linger after the map has cleared the icon.
+            // Conversely, an empty catalog does not prove an active icon cleared.
+            markerCleared = flag === "00";
+        } catch (_) { markerCleared = false; }
+    }
+    if (!markerCleared) {
+        finalClearDone = false;
+        if (markerClearAttempts === 1 && !scriptStopping)
+            log("GPS: LIMPEZA PENDENTE.");
+        if (markerClearAttempts >= 3 && !markerClearWarningIssued && !scriptStopping) {
+            markerClearWarningIssued = true;
+            sendLabEvent("waypoint_clear_unconfirmed", {
+                reason:String(reason || ""), attempts:markerClearAttempts,
+                current_key:currentKey
+            });
+            log("🟠 LAB: NÃO FOI POSSÍVEL CONFIRMAR A LIMPEZA DA MARCAÇÃO.");
+        }
+        // The existing one-second monitor retries at most three native calls.
+        // After that it only observes; it never writes directly to game memory.
+        return;
+    }
     resetMarkerState();
     finalClearDone = true;
-
-    if (pending.length === 0 && lastInternalSetPosition !== null) {
-        try {
-            const snapshot = labCollectRegistry(false);
-            if (snapshot.ok === true &&
-                Array.isArray(snapshot.waypoint_entries) &&
-                snapshot.waypoint_entries.some(function (entry) {
-                    return registryWaypointPointer(entry) !== null;
-                })) {
-                markerCleared = false;
-                const map = getMap();
-                const flag = map.isNull() ? "" :
-                    labHex(map.add(0x3d3), 1);
-                sendLabEvent(flag === "00"
-                    ? "waypoint_clear_registry_settling"
-                    : "waypoint_clear_still_visible", {
-                    reason:String(reason || ""),
-                    map_flag_hex:flag,
-                    waypoint_entries:labSanitizeValue(
-                        snapshot.waypoint_entries, 0
-                    )
-                });
-                if (flag !== "00" && !scriptStopping)
-                    log("🟠 LAB: ERRO AO LIMPAR MARCAÇÃO. " +
-                        "PARE E ENVIE LOG.TXT.");
-            } else if (snapshot.ok === true) {
-                markerCleared = true;
-            }
-        } catch (_) {}
-    }
-
-    if ((hadWork || forceLog) && markerCleared)
+    markerClearAttempts = 0;
+    markerClearWarningIssued = false;
+    if (hadWork || forceLog || hadCleanup)
         log(`🧹 GPS limpo (${reason}).`);
 }
 

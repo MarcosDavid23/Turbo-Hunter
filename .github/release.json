@@ -4,5 +4,10 @@
   "title": "Turbo Hunter 0.6.0",
   "asset": "releases/TurboHunter_0.6.0_NEXUS.zip",
   "notes": "releases/v0.6.0.md",
-  "sha256": "53ba211fe22a3e0e6f1bcbd475edd95084628170c542cd4f144be36a6e8bd30c"
+  "sha256": "cbe4ab19647683d80ea6296c52fa1452ed9ecc635ed9bb8111f446a5e25a1deb",
+  "replace_existing": {
+    "release_id": 424571049,
+    "previous_commit": "a5b55fc4148d0cc4156cd766573f35bc9eab0a25",
+    "previous_sha256": "53ba211fe22a3e0e6f1bcbd475edd95084628170c542cd4f144be36a6e8bd30c"
+  }
 }
