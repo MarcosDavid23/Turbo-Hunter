@@ -1,0 +1,35 @@
+{
+  "current": {
+    "tag": "v0.6.0",
+    "id": 424571049,
+    "commit": "36d7f781cee86debe1bcdf170b9ce2a9be4c37c2",
+    "sha256": "cbe4ab19647683d80ea6296c52fa1452ed9ecc635ed9bb8111f446a5e25a1deb"
+  },
+  "releases": [
+    {
+      "version": "0.4.4",
+      "tag": "v0.4.4",
+      "commit": "12ebb18f77349e7a749a4a969a00e378ae2cb87d",
+      "asset": "releases/archive/TurboHunter_0.4.4.zip",
+      "sha256": "f741eb63cf8d6a4f3a0967ee79cb78418b2422e20c5bd1c1817cfe8f002464f0",
+      "files": 11,
+      "recovered": true
+    },
+    {
+      "version": "0.5.4",
+      "tag": "v0.5.4",
+      "commit": "28fb546a26ce0384074e146e840ae5f5725e2d2b",
+      "asset": "releases/archive/TurboHunter_0.5.4.zip",
+      "sha256": "814cc032a3fd010cb173c425f115e14d91c6f8cfa67a1d866b5cb75ce12998d5",
+      "files": 11
+    },
+    {
+      "version": "0.5.7",
+      "tag": "v0.5.7",
+      "commit": "c3941514e00c30b8809afd7e178e71b4cf2be8e6",
+      "asset": "releases/archive/TurboHunter_0.5.7.zip",
+      "sha256": "b871f6af92709d24a9b3c245b8594d34ac3461e44fc2e8994ed13b1416f9f53c",
+      "files": 12
+    }
+  ]
+}

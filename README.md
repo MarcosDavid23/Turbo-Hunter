@@ -23,6 +23,8 @@ Use the same installer to update. It removes old mod-owned Python, libraries and
 
 The approved installer ZIP is also kept in [`releases/`](releases/) so its exact contents and checksum can be checked against the published release.
 
+Previous versions are available as [historical releases](releases/archive/README.md). Version **0.6.0** remains the current recommended download.
+
 ## How to play
 
 Enter a **SOLO** hunt and click **START MOD** if it is not already running. Wait for the on-screen counter. Hunt normally. Turbo Hunter marks the nearest downed animal and updates the count and marker when you harvest it.
